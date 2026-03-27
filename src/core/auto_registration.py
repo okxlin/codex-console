@@ -32,13 +32,6 @@ def _remaining_delay(target_time: float, now: float) -> float:
     return max(0.0, target_time - now)
 
 
-def _next_scheduled_time(
-    previous_scheduled_time: Optional[float], interval: int, now: float
-) -> float:
-    base_time = previous_scheduled_time if previous_scheduled_time is not None else now
-    return base_time + max(0, interval)
-
-
 def update_auto_registration_state(**kwargs) -> dict:
     _auto_registration_state.update(kwargs)
     return get_auto_registration_state()
@@ -289,4 +282,4 @@ class AutoRegistrationCoordinator:
                     "[自动注册] 自动注册循环执行失败，请检查服务端日志"
                 )
 
-            next_check_at = _next_scheduled_time(scheduled_start, interval, loop.time())
+            next_check_at = loop.time() + interval
