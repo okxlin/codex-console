@@ -74,13 +74,12 @@ class AutoRegistrationPlan:
     cpa_service_id: int
 
 
-def build_auto_registration_plan(settings: Settings) -> Optional[AutoRegistrationPlan]:
-    if not settings.registration_auto_enabled:
-        return None
-
+def get_auto_registration_inventory(
+    settings: Settings,
+) -> Optional[tuple[int, int, int]]:
     cpa_service_id = int(settings.registration_auto_cpa_service_id or 0)
     if cpa_service_id <= 0:
-        logger.warning("自动注册已启用，但未配置 CPA 服务 ID，跳过本轮检查")
+        logger.warning("自动注册已启用，但未配置 CPA 服务 ID，跳过库存检查")
         return None
 
     with get_db() as db:
@@ -99,12 +98,24 @@ def build_auto_registration_plan(settings: Settings) -> Optional[AutoRegistratio
         str(cpa_service.api_token),
     )
     if not success:
-        logger.warning("自动注册检查 auth-files 失败: %s", message)
+        logger.warning("自动注册读取 auth-files 库存失败: %s", message)
         return None
 
     ready_count = count_ready_cpa_auth_files(payload)
     min_ready_auth_files = max(1, int(settings.registration_auto_min_ready_auth_files))
     deficit = max(0, min_ready_auth_files - ready_count)
+    return ready_count, min_ready_auth_files, deficit
+
+
+def build_auto_registration_plan(settings: Settings) -> Optional[AutoRegistrationPlan]:
+    if not settings.registration_auto_enabled:
+        return None
+
+    inventory = get_auto_registration_inventory(settings)
+    if inventory is None:
+        return None
+
+    ready_count, min_ready_auth_files, deficit = inventory
     if deficit <= 0:
         logger.info(
             "自动注册库存充足，当前可用 %s / 目标 %s",

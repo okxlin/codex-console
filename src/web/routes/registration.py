@@ -6,7 +6,7 @@ import asyncio
 import logging
 import uuid
 import random
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional, Dict, Tuple
 
 from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
@@ -20,6 +20,7 @@ from ...services import EmailServiceFactory, EmailServiceType
 from ...config.settings import get_settings, Settings
 from ...core.auto_registration import (
     add_auto_registration_log,
+    get_auto_registration_inventory,
     get_auto_registration_logs,
     get_auto_registration_state,
     update_auto_registration_state,
@@ -978,6 +979,20 @@ async def run_auto_registration_batch(plan, settings: Settings) -> str:
     batch = batch_tasks.get(batch_id)
     if batch:
         batch_cancelled = bool(batch.get("cancelled"))
+        current_auto_state = get_auto_registration_state()
+        refreshed_inventory = await asyncio.to_thread(
+            get_auto_registration_inventory, settings
+        )
+        refreshed_ready_count = (
+            refreshed_inventory[0]
+            if refreshed_inventory
+            else current_auto_state.get("current_ready_count")
+        )
+        refreshed_target_count = (
+            refreshed_inventory[1]
+            if refreshed_inventory
+            else max(1, int(settings.registration_auto_min_ready_auth_files or 1))
+        )
         final_status = "cancelled" if batch_cancelled else "idle"
         final_message = (
             f"自动补货批量任务已取消: {batch_id}"
@@ -993,6 +1008,9 @@ async def run_auto_registration_batch(plan, settings: Settings) -> str:
             status=final_status,
             message=final_message,
             current_batch_id=None,
+            current_ready_count=refreshed_ready_count,
+            target_ready_count=refreshed_target_count,
+            last_checked_at=datetime.now(timezone.utc).isoformat(),
         )
         add_auto_registration_log(final_log_message)
 

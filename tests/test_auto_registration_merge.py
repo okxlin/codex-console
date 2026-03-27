@@ -192,6 +192,96 @@ def test_auto_registration_running_batch_can_be_cancelled(monkeypatch):
         task_manager.cleanup_task(task_uuid)
 
 
+def test_auto_registration_batch_refreshes_monitor_state_after_completion(monkeypatch):
+    plan = AutoRegistrationPlan(
+        deficit=2,
+        ready_count=1,
+        min_ready_auth_files=3,
+        cpa_service_id=123,
+    )
+    settings = Settings(
+        registration_auto_email_service_type="tempmail",
+        registration_auto_mode="pipeline",
+        registration_auto_min_ready_auth_files=3,
+    )
+
+    @contextmanager
+    def fake_get_db():
+        yield object()
+
+    def fake_create_registration_task(db, task_uuid, proxy=None, email_service_id=None):
+        return {"task_uuid": task_uuid}
+
+    async def fake_run_batch_registration(**kwargs):
+        batch_id = kwargs["batch_id"]
+        registration._init_batch_state(batch_id, kwargs["task_uuids"])
+        registration.batch_tasks[batch_id]["success"] = 2
+        registration.batch_tasks[batch_id]["failed"] = 0
+        registration.batch_tasks[batch_id]["finished"] = True
+
+    monkeypatch.setattr(registration, "get_db", fake_get_db)
+    monkeypatch.setattr(registration.crud, "create_registration_task", fake_create_registration_task)
+    monkeypatch.setattr(registration, "run_batch_registration", fake_run_batch_registration)
+    monkeypatch.setattr(registration, "add_auto_registration_log", lambda message: None)
+    monkeypatch.setattr(
+        registration,
+        "get_auto_registration_inventory",
+        lambda current_settings: (3, 3, 0),
+    )
+
+    asyncio.run(registration.run_auto_registration_batch(plan, settings))
+
+    state = auto_registration.get_auto_registration_state()
+    assert state["status"] == "idle"
+    assert state["current_ready_count"] == 3
+    assert state["target_ready_count"] == 3
+    assert state["last_checked_at"] is not None
+
+
+def test_auto_registration_batch_refresh_preserves_inventory_when_refresh_fails(monkeypatch):
+    plan = AutoRegistrationPlan(
+        deficit=1,
+        ready_count=1,
+        min_ready_auth_files=3,
+        cpa_service_id=123,
+    )
+    settings = Settings(
+        registration_auto_email_service_type="tempmail",
+        registration_auto_mode="pipeline",
+        registration_auto_min_ready_auth_files=3,
+    )
+
+    @contextmanager
+    def fake_get_db():
+        yield object()
+
+    def fake_create_registration_task(db, task_uuid, proxy=None, email_service_id=None):
+        return {"task_uuid": task_uuid}
+
+    async def fake_run_batch_registration(**kwargs):
+        batch_id = kwargs["batch_id"]
+        registration._init_batch_state(batch_id, kwargs["task_uuids"])
+        registration.batch_tasks[batch_id]["success"] = 1
+        registration.batch_tasks[batch_id]["failed"] = 0
+        registration.batch_tasks[batch_id]["finished"] = True
+
+    monkeypatch.setattr(registration, "get_db", fake_get_db)
+    monkeypatch.setattr(registration.crud, "create_registration_task", fake_create_registration_task)
+    monkeypatch.setattr(registration, "run_batch_registration", fake_run_batch_registration)
+    monkeypatch.setattr(registration, "add_auto_registration_log", lambda message: None)
+    monkeypatch.setattr(registration, "get_auto_registration_inventory", lambda current_settings: None)
+
+    auto_registration.update_auto_registration_state(current_ready_count=2, target_ready_count=3)
+
+    asyncio.run(registration.run_auto_registration_batch(plan, settings))
+
+    state = auto_registration.get_auto_registration_state()
+    assert state["status"] == "idle"
+    assert state["current_ready_count"] == 2
+    assert state["target_ready_count"] == 3
+    assert state["last_checked_at"] is not None
+
+
 def test_cancelled_registration_task_persists_cancelled_status(monkeypatch):
     task_uuid = "cancelled-task-uuid"
     updates = []
