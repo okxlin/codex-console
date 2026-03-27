@@ -10,14 +10,21 @@ from datetime import datetime
 from typing import List, Optional, Dict, Tuple
 
 from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ...database import crud
 from ...database.session import get_db
 from ...database.models import RegistrationTask, Proxy
 from ...core.register import RegistrationEngine, RegistrationResult
 from ...services import EmailServiceFactory, EmailServiceType
-from ...config.settings import get_settings
+from ...config.settings import get_settings, Settings
+from ...core.auto_registration import (
+    add_auto_registration_log,
+    get_auto_registration_logs,
+    get_auto_registration_state,
+    update_auto_registration_state,
+)
+from ...core.timezone_utils import utcnow_naive
 from ..task_manager import task_manager
 
 logger = logging.getLogger(__name__)
@@ -112,8 +119,7 @@ class RegistrationTaskResponse(BaseModel):
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class BatchRegistrationResponse(BaseModel):
@@ -241,7 +247,7 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
             task = crud.update_registration_task(
                 db, task_uuid,
                 status="running",
-                started_at=datetime.utcnow()
+                started_at=utcnow_naive()
             )
 
             if not task:
@@ -451,7 +457,7 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                                     _ok, _msg = upload_to_cpa(token_data, api_url=_svc.api_url, api_token=_svc.api_token)
                                     if _ok:
                                         saved_account.cpa_uploaded = True
-                                        saved_account.cpa_uploaded_at = datetime.utcnow()
+                                        saved_account.cpa_uploaded_at = utcnow_naive()
                                         db.commit()
                                         log_callback(f"[CPA] 投递成功，服务站已签收: {_svc.name}")
                                     else:
@@ -515,7 +521,7 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                 crud.update_registration_task(
                     db, task_uuid,
                     status="completed",
-                    completed_at=datetime.utcnow(),
+                    completed_at=utcnow_naive(),
                     result=result.to_dict()
                 )
 
@@ -528,7 +534,7 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                 crud.update_registration_task(
                     db, task_uuid,
                     status="failed",
-                    completed_at=datetime.utcnow(),
+                    completed_at=utcnow_naive(),
                     error_message=result.error_message
                 )
 
@@ -545,7 +551,7 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                     crud.update_registration_task(
                         db, task_uuid,
                         status="failed",
-                        completed_at=datetime.utcnow(),
+                        completed_at=utcnow_naive(),
                         error_message=str(e)
                     )
 
@@ -817,6 +823,92 @@ async def run_batch_registration(
         )
 
 
+async def run_auto_registration_batch(plan, settings: Settings) -> str:
+    email_service_type = settings.registration_auto_email_service_type
+    try:
+        EmailServiceType(email_service_type)
+    except ValueError as exc:
+        raise ValueError(f"自动注册邮箱服务类型无效: {email_service_type}") from exc
+
+    mode = settings.registration_auto_mode or "pipeline"
+    if mode not in ("parallel", "pipeline"):
+        raise ValueError(f"自动注册模式无效: {mode}")
+
+    interval_min = max(0, int(settings.registration_auto_interval_min))
+    interval_max = max(interval_min, int(settings.registration_auto_interval_max))
+    concurrency = max(1, int(settings.registration_auto_concurrency))
+    email_service_id = int(settings.registration_auto_email_service_id or 0) or None
+    proxy = settings.registration_auto_proxy.strip() or None
+
+    batch_id = str(uuid.uuid4())
+    task_uuids = []
+
+    with get_db() as db:
+        for _ in range(plan.deficit):
+            task_uuid = str(uuid.uuid4())
+            crud.create_registration_task(
+                db,
+                task_uuid=task_uuid,
+                proxy=proxy,
+                email_service_id=email_service_id,
+            )
+            task_uuids.append(task_uuid)
+
+    update_auto_registration_state(
+        status="running",
+        message=f"自动补货任务运行中: {batch_id}",
+        current_batch_id=batch_id,
+    )
+    add_auto_registration_log(
+        f"[自动注册] 已创建补货批量任务 {batch_id}，计划注册 {len(task_uuids)} 个账号"
+    )
+    logger.info(
+        "自动注册批量任务已创建: batch=%s, count=%s, cpa_service_id=%s",
+        batch_id,
+        len(task_uuids),
+        plan.cpa_service_id,
+    )
+
+    await run_batch_registration(
+        batch_id=batch_id,
+        task_uuids=task_uuids,
+        email_service_type=email_service_type,
+        proxy=proxy,
+        email_service_config=None,
+        email_service_id=email_service_id,
+        interval_min=interval_min,
+        interval_max=interval_max,
+        concurrency=concurrency,
+        mode=mode,
+        auto_upload_cpa=True,
+        cpa_service_ids=[plan.cpa_service_id],
+        auto_upload_sub2api=False,
+        sub2api_service_ids=[],
+        auto_upload_tm=False,
+        tm_service_ids=[],
+    )
+
+    batch = batch_tasks.get(batch_id)
+    if batch:
+        batch_cancelled = bool(batch.get("cancelled"))
+        final_status = "cancelled" if batch_cancelled else "idle"
+        final_message = (
+            f"自动补货批量任务已取消: {batch_id}"
+            if batch_cancelled
+            else f"自动补货批量任务已完成: {batch_id}"
+        )
+        update_auto_registration_state(
+            status=final_status,
+            message=final_message,
+            current_batch_id=None,
+        )
+        add_auto_registration_log(
+            f"[自动注册] 补货批量任务完成：成功 {batch.get('success', 0)}，失败 {batch.get('failed', 0)}"
+        )
+
+    return batch_id
+
+
 # ============== API Endpoints ==============
 
 @router.post("/start", response_model=RegistrationTaskResponse)
@@ -972,6 +1064,32 @@ async def get_batch_status(batch_id: str):
     }
 
 
+@router.get("/auto-monitor")
+async def get_auto_registration_monitor():
+    auto_state = get_auto_registration_state()
+    current_batch_id = auto_state.get("current_batch_id")
+    batch = batch_tasks.get(current_batch_id) if current_batch_id else None
+    logs = get_auto_registration_logs().copy()
+    if batch and current_batch_id:
+        logs.extend(task_manager.get_batch_logs(current_batch_id))
+
+    return {
+        **auto_state,
+        "logs": logs,
+        "batch": {
+            "batch_id": current_batch_id,
+            "total": batch["total"],
+            "completed": batch["completed"],
+            "success": batch["success"],
+            "failed": batch["failed"],
+            "current_index": batch["current_index"],
+            "cancelled": batch["cancelled"],
+            "finished": batch.get("finished", False),
+            "progress": f"{batch['completed']}/{batch['total']}",
+        } if batch else None,
+    }
+
+
 @router.post("/batch/{batch_id}/cancel")
 async def cancel_batch(batch_id: str):
     """取消批量任务"""
@@ -1086,7 +1204,7 @@ async def get_registration_stats():
         ).group_by(RegistrationTask.status).all()
 
         # 今日统计
-        today = datetime.utcnow().date()
+        today = utcnow_naive().date()
         today_status_stats = db.query(
             RegistrationTask.status,
             func.count(RegistrationTask.id)
