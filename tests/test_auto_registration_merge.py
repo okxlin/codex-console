@@ -40,6 +40,28 @@ def test_run_auto_registration_batch_rejects_invalid_email_type():
         raise AssertionError("expected ValueError for invalid email service type")
 
 
+def test_build_auto_registration_plan_keeps_cpa_service_id(monkeypatch):
+    settings = Settings(
+        registration_auto_enabled=True,
+        registration_auto_cpa_service_id=321,
+        registration_auto_min_ready_auth_files=3,
+    )
+
+    monkeypatch.setattr(
+        auto_registration,
+        "get_auto_registration_inventory",
+        lambda current_settings: (1, 3, 2),
+    )
+
+    plan = auto_registration.build_auto_registration_plan(settings)
+
+    assert plan is not None
+    assert plan.cpa_service_id == 321
+    assert plan.ready_count == 1
+    assert plan.min_ready_auth_files == 3
+    assert plan.deficit == 2
+
+
 def test_auto_registration_immediate_check_keeps_regular_interval(monkeypatch):
     class MutableSettings:
         registration_auto_enabled = False

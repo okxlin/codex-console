@@ -111,6 +111,7 @@ def build_auto_registration_plan(settings: Settings) -> Optional[AutoRegistratio
     if not settings.registration_auto_enabled:
         return None
 
+    cpa_service_id = int(settings.registration_auto_cpa_service_id or 0)
     inventory = get_auto_registration_inventory(settings)
     if inventory is None:
         return None
