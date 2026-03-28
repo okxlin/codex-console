@@ -24,6 +24,7 @@ class SettingCategory(str, Enum):
     EMAIL = "email"
     TEMPMAIL = "tempmail"
     CODEX_OTP = "codex_otp"
+    CODEX_OTP_D1 = "codex_otp_d1"
     CUSTOM_DOMAIN = "moe_mail"
     SECURITY = "security"
     CPA = "cpa"
@@ -510,6 +511,49 @@ SETTING_DEFINITIONS: Dict[str, SettingDefinition] = {
         category=SettingCategory.CODEX_OTP,
         description="Codex OTP 地址默认生存时间（秒）"
     ),
+    "codex_otp_d1_enabled": SettingDefinition(
+        db_key="codex_otp_d1.enabled",
+        default_value=False,
+        category=SettingCategory.CODEX_OTP_D1,
+        description="是否启用 Codex OTP D1 只读模式"
+    ),
+    "codex_otp_d1_domain": SettingDefinition(
+        db_key="codex_otp_d1.domain",
+        default_value="",
+        category=SettingCategory.CODEX_OTP_D1,
+        description="Codex OTP D1 邮箱域名"
+    ),
+    "codex_otp_d1_cf_account_id": SettingDefinition(
+        db_key="codex_otp_d1.cf_account_id",
+        default_value="",
+        category=SettingCategory.CODEX_OTP_D1,
+        description="Codex OTP D1 Cloudflare Account ID"
+    ),
+    "codex_otp_d1_cf_database_id": SettingDefinition(
+        db_key="codex_otp_d1.cf_database_id",
+        default_value="",
+        category=SettingCategory.CODEX_OTP_D1,
+        description="Codex OTP D1 Database ID"
+    ),
+    "codex_otp_d1_cf_runtime_api_token": SettingDefinition(
+        db_key="codex_otp_d1.cf_runtime_api_token",
+        default_value="",
+        category=SettingCategory.CODEX_OTP_D1,
+        description="Codex OTP D1 运行期只读 Token",
+        is_secret=True,
+    ),
+    "codex_otp_d1_timeout": SettingDefinition(
+        db_key="codex_otp_d1.timeout",
+        default_value=30,
+        category=SettingCategory.CODEX_OTP_D1,
+        description="Codex OTP D1 查询超时"
+    ),
+    "codex_otp_d1_poll_interval": SettingDefinition(
+        db_key="codex_otp_d1.poll_interval",
+        default_value=3,
+        category=SettingCategory.CODEX_OTP_D1,
+        description="Codex OTP D1 轮询间隔"
+    ),
 
     # 自定义域名邮箱配置
     "custom_domain_base_url": SettingDefinition(
@@ -658,6 +702,9 @@ SETTING_TYPES: Dict[str, Type] = {
     "codex_otp_max_retries": int,
     "codex_otp_poll_interval": int,
     "codex_otp_ttl_seconds": int,
+    "codex_otp_d1_enabled": bool,
+    "codex_otp_d1_timeout": int,
+    "codex_otp_d1_poll_interval": int,
     "tm_enabled": bool,
     "cpa_enabled": bool,
     "email_code_timeout": int,
@@ -969,6 +1016,13 @@ class Settings(BaseModel):
     codex_otp_max_retries: int = 3
     codex_otp_poll_interval: int = 3
     codex_otp_ttl_seconds: int = 1800
+    codex_otp_d1_enabled: bool = False
+    codex_otp_d1_domain: str = ""
+    codex_otp_d1_cf_account_id: str = ""
+    codex_otp_d1_cf_database_id: str = ""
+    codex_otp_d1_cf_runtime_api_token: Optional[SecretStr] = None
+    codex_otp_d1_timeout: int = 30
+    codex_otp_d1_poll_interval: int = 3
 
     # 自定义域名邮箱配置
     custom_domain_base_url: str = ""

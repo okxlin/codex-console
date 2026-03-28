@@ -108,6 +108,7 @@
                     <h3>🔗 自定义邮箱服务</h3>
                     <div style="display:flex;gap:var(--spacing-sm);flex-wrap:wrap;">
                         <button class="btn btn-secondary btn-sm" id="open-codex-otp-provision-btn">⚙️ 初始化 Codex OTP</button>
+                        <button class="btn btn-secondary btn-sm" id="open-codex-otp-d1-provision-btn">🗄️ 初始化 Codex OTP D1</button>
                         <button class="btn btn-primary btn-sm" id="add-custom-btn">➕ 添加服务</button>
                     </div>
                 </div>
@@ -263,6 +264,7 @@
                             <option value="yydsmail">YYDS Mail (YYDS Mail API)</option>
                             <option value="tempmail">TempMail（自部署 Cloudflare Worker）</option>
                             <option value="codexotp">Codex OTP（专用 OTP Worker）</option>
+                            <option value="codexotpd1">Codex OTP D1（只读 D1 模式）</option>
                             <option value="duckmail">DuckMail（DuckMail API）</option>
                             <option value="freemail">Freemail（自部署 Cloudflare Worker）</option>
                             <option value="imap">标准 IMAP（Gmail/QQ/163等）</option>
@@ -328,6 +330,25 @@
                         <div class="form-group">
                             <label for="custom-codex-domain">邮箱域名</label>
                             <input type="text" id="custom-codex-domain" name="codex_domain" placeholder="mail.example.com">
+                        </div>
+                    </div>
+                    <div id="add-codexotpd1-fields" style="display:none;">
+                        <div class="form-group">
+                            <label for="custom-codexd1-domain">邮箱域名</label>
+                            <input type="text" id="custom-codexd1-domain" name="codexd1_domain" placeholder="mail.example.com">
+                        </div>
+                        <div class="form-group">
+                            <label for="custom-codexd1-account-id">Cloudflare Account ID</label>
+                            <input type="text" id="custom-codexd1-account-id" name="codexd1_account_id" placeholder="Account ID">
+                        </div>
+                        <div class="form-group">
+                            <label for="custom-codexd1-database-id">D1 Database ID</label>
+                            <input type="text" id="custom-codexd1-database-id" name="codexd1_database_id" placeholder="Database ID">
+                        </div>
+                        <div class="form-group">
+                            <label for="custom-codexd1-runtime-token">D1 只读 Token</label>
+                            <input type="password" id="custom-codexd1-runtime-token" name="codexd1_runtime_token" placeholder="Runtime read-only token">
+                            <small style="color: var(--text-muted);">该 Token 仅用于运行期查询验证码，不用于初始化。</small>
                         </div>
                     </div>
                     <!-- DuckMail 字段 -->
@@ -500,6 +521,25 @@
                             <input type="text" id="edit-codex-domain" name="codex_domain" placeholder="mail.example.com">
                         </div>
                     </div>
+                    <div id="edit-codexotpd1-fields" style="display:none;">
+                        <div class="form-group">
+                            <label for="edit-codexd1-domain">邮箱域名</label>
+                            <input type="text" id="edit-codexd1-domain" name="codexd1_domain" placeholder="mail.example.com">
+                        </div>
+                        <div class="form-group">
+                            <label for="edit-codexd1-account-id">Cloudflare Account ID</label>
+                            <input type="text" id="edit-codexd1-account-id" name="codexd1_account_id" placeholder="Account ID">
+                        </div>
+                        <div class="form-group">
+                            <label for="edit-codexd1-database-id">D1 Database ID</label>
+                            <input type="text" id="edit-codexd1-database-id" name="codexd1_database_id" placeholder="Database ID">
+                        </div>
+                        <div class="form-group">
+                            <label for="edit-codexd1-runtime-token">D1 只读 Token</label>
+                            <input type="password" id="edit-codexd1-runtime-token" name="codexd1_runtime_token" placeholder="留空则不修改">
+                            <small style="color: var(--text-muted);">留空则保持原值不变</small>
+                        </div>
+                    </div>
                     <!-- DuckMail 字段 -->
                     <div id="edit-duckmail-fields" style="display:none;">
                         <div class="form-group">
@@ -663,8 +703,8 @@
                             <input type="text" id="codex-otp-account-id" name="account_id" required>
                         </div>
                         <div class="form-group">
-                            <label for="codex-otp-zone-id">Zone ID（可选）</label>
-                            <input type="text" id="codex-otp-zone-id" name="zone_id" placeholder="用于自动绑定 HTTP Route">
+                            <label for="codex-otp-zone-id">Zone ID</label>
+                            <input type="text" id="codex-otp-zone-id" name="zone_id" placeholder="填写 HTTP Route 时必须提供对应 Zone ID">
                         </div>
                     </div>
                     <div class="form-group">
@@ -676,6 +716,7 @@
                         <div class="form-group">
                             <label for="codex-otp-route-pattern">HTTP Route</label>
                             <input type="text" id="codex-otp-route-pattern" name="route_pattern" required placeholder="otp.example.com/*">
+                            <small style="color: var(--text-muted);">如需自动创建 Workers Route，必须同时填写 Zone ID；若准备手工绑定，可清空该字段。</small>
                         </div>
                         <div class="form-group">
                             <label for="codex-otp-email-domain">邮箱域名</label>
@@ -714,6 +755,63 @@
                         <button type="button" class="btn btn-secondary" id="cancel-codex-otp-provision">取消</button>
                     </div>
                     <div id="codex-otp-provision-result" style="display:none;margin-top:var(--spacing-md);"></div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="codex-otp-d1-provision-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>🗄️ 初始化 Codex OTP D1</h3>
+                <button class="modal-close" id="close-codex-otp-d1-provision-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="codex-otp-d1-provision-form">
+                    <div class="form-group">
+                        <label for="codex-otp-d1-service-name">服务名称</label>
+                        <input type="text" id="codex-otp-d1-service-name" name="service_name" required placeholder="例如：Codex OTP D1 主节点">
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="codex-otp-d1-script-name">Email Worker Script 名称</label>
+                            <input type="text" id="codex-otp-d1-script-name" name="script_name" required placeholder="codex-otp-d1-main">
+                        </div>
+                        <div class="form-group">
+                            <label for="codex-otp-d1-db-name">D1 名称</label>
+                            <input type="text" id="codex-otp-d1-db-name" name="database_name" required placeholder="codex-otp-d1-db">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="codex-otp-d1-account-id">Cloudflare Account ID</label>
+                            <input type="text" id="codex-otp-d1-account-id" name="account_id" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="codex-otp-d1-email-domain">邮箱域名</label>
+                            <input type="text" id="codex-otp-d1-email-domain" name="email_domain" required placeholder="mail.example.com">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="codex-otp-d1-api-token">Cloudflare 初始化 Token</label>
+                        <input type="password" id="codex-otp-d1-api-token" name="api_token" required placeholder="用于创建 D1 和部署 Email Worker">
+                    </div>
+                    <div class="form-group">
+                        <label for="codex-otp-d1-runtime-token">运行期 D1 只读 Token</label>
+                        <input type="password" id="codex-otp-d1-runtime-token" name="runtime_api_token" required placeholder="用于 codex-console 读取验证码">
+                        <small style="color: var(--text-muted);">建议不要与初始化 Token 共用。D1 模式不依赖公开 HTTP 管理接口。</small>
+                    </div>
+                    <div class="form-group">
+                        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                            <input type="checkbox" id="codex-otp-d1-allow-override" name="allow_override" value="true">
+                            <span>允许复用已有 D1 / Worker</span>
+                        </label>
+                    </div>
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary" id="codex-otp-d1-provision-submit">开始初始化</button>
+                        <button type="button" class="btn btn-secondary" id="cancel-codex-otp-d1-provision">取消</button>
+                    </div>
+                    <div id="codex-otp-d1-provision-result" style="display:none;margin-top:var(--spacing-md);"></div>
                 </form>
             </div>
         </div>

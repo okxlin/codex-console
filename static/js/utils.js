@@ -355,6 +355,7 @@ const statusMap = {
         moe_mail: 'MoeMail',
         temp_mail: 'Temp-Mail（自部署）',
         codex_otp: 'Codex OTP',
+        codex_otp_d1: 'Codex OTP D1',
         duck_mail: 'DuckMail',
         freemail: 'Freemail',
         imap_mail: 'IMAP 邮箱'

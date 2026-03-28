@@ -14,7 +14,7 @@ from ...database.session import get_db
 from ...database.models import EmailService as EmailServiceModel
 from ...database.models import Account as AccountModel
 from ...config.settings import get_settings, update_settings
-from ...core.codex_otp_provisioner import CodexOtpProvisionError, provision_codex_otp_idempotent
+from ...core.codex_otp_provisioner import CodexOtpProvisionError, provision_codex_otp_d1_idempotent, provision_codex_otp_idempotent
 from ...services import EmailServiceFactory, EmailServiceType
 
 logger = logging.getLogger(__name__)
@@ -99,6 +99,7 @@ SENSITIVE_FIELDS = {
     'custom_auth',
     'cf_api_token',
     'admin_token',
+    'cf_runtime_api_token',
 }
 
 def filter_sensitive_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -117,6 +118,9 @@ def filter_sensitive_config(config: Dict[str, Any]) -> Dict[str, Any]:
     # 为 Outlook 计算是否有 OAuth
     if config.get('client_id') and config.get('refresh_token'):
         filtered['has_oauth'] = True
+
+    if config.get('cf_runtime_api_token'):
+        filtered['has_runtime_api_token'] = True
 
     if isinstance(config.get('cloudflare'), dict):
         cloudflare = dict(config['cloudflare'])
@@ -201,6 +205,7 @@ async def get_email_services_stats():
             'imap_mail_count': 0,
             'cloudmail_count': 0,
             'codex_otp_count': 0,
+            'codex_otp_d1_count': 0,
             'tempmail_available': tempmail_enabled or yyds_enabled,
             'yyds_mail_available': yyds_enabled,
             'enabled_count': enabled_count
@@ -225,6 +230,8 @@ async def get_email_services_stats():
                 stats['cloudmail_count'] = count
             elif service_type == 'codex_otp':
                 stats['codex_otp_count'] = count
+            elif service_type == 'codex_otp_d1':
+                stats['codex_otp_d1_count'] = count
 
         return stats
 
@@ -330,6 +337,18 @@ async def get_service_types():
                     {"name": "custom_auth", "label": "Custom Auth（可选）", "required": False, "secret": True},
                     {"name": "domain", "label": "邮箱域名", "required": True, "placeholder": "mail.example.com"},
                     {"name": "ttl_seconds", "label": "地址 TTL（秒）", "required": False, "default": 1800},
+                    {"name": "poll_interval", "label": "轮询间隔（秒）", "required": False, "default": 3},
+                ]
+            },
+            {
+                "value": "codex_otp_d1",
+                "label": "Codex OTP D1",
+                "description": "只读 D1 取码模式，Worker 仅负责收信提码",
+                "config_fields": [
+                    {"name": "domain", "label": "邮箱域名", "required": True, "placeholder": "mail.example.com"},
+                    {"name": "cf_account_id", "label": "Cloudflare Account ID", "required": True},
+                    {"name": "cf_database_id", "label": "D1 Database ID", "required": True},
+                    {"name": "cf_runtime_api_token", "label": "D1 只读 Token", "required": True, "secret": True},
                     {"name": "poll_interval", "label": "轮询间隔（秒）", "required": False, "default": 3},
                 ]
             }
@@ -705,6 +724,22 @@ class CodexOtpProvisionRequest(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
 
 
+class CodexOtpD1ProvisionRequest(BaseModel):
+    service_name: str
+    script_name: str
+    database_name: str
+    email_domain: str
+    account_id: str
+    api_token: str
+    runtime_api_token: str = ""
+    location_hint: str = ""
+    enabled: bool = True
+    priority: int = 0
+    allow_override: bool = False
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
 @router.post("/codex-otp/provision")
 async def provision_codex_otp_service(request: CodexOtpProvisionRequest):
     """一键初始化 Codex OTP Worker、D1 以及本地服务配置。"""
@@ -732,10 +767,63 @@ async def provision_codex_otp_service(request: CodexOtpProvisionRequest):
             )
         except CodexOtpProvisionError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Codex OTP 初始化未捕获异常")
+            raise HTTPException(status_code=500, detail=f"Codex OTP 初始化内部错误: {type(exc).__name__}") from exc
 
         config = {
             **result.service_config,
             "cloudflare": result.cloudflare,
+        }
+
+
+@router.post("/codex-otp-d1/provision")
+async def provision_codex_otp_d1_service(request: CodexOtpD1ProvisionRequest):
+    """一键初始化 Codex OTP D1 只读模式。"""
+    with get_db() as db:
+        existing = db.query(EmailServiceModel).filter(EmailServiceModel.name == request.service_name).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="服务名称已存在")
+
+        try:
+            result = provision_codex_otp_d1_idempotent(
+                account_id=request.account_id,
+                api_token=request.api_token,
+                script_name=request.script_name,
+                database_name=request.database_name,
+                email_domain=request.email_domain,
+                service_name=request.service_name,
+                location_hint=request.location_hint,
+                allow_override=request.allow_override,
+            )
+        except CodexOtpProvisionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            logger.exception("Codex OTP D1 初始化未捕获异常")
+            raise HTTPException(status_code=500, detail=f"Codex OTP D1 初始化内部错误: {type(exc).__name__}") from exc
+
+        config = {
+            **result.service_config,
+            "cf_runtime_api_token": request.runtime_api_token,
+            "cloudflare": result.cloudflare,
+        }
+        service = EmailServiceModel(
+            service_type="codex_otp_d1",
+            name=request.service_name,
+            config=config,
+            enabled=request.enabled,
+            priority=request.priority,
+        )
+        db.add(service)
+        db.commit()
+        db.refresh(service)
+
+        return {
+            "success": True,
+            "service": service_to_response(service),
+            "cloudflare": result.cloudflare,
+            "next_steps": result.next_steps,
+            "steps": result.steps,
         }
         service = EmailServiceModel(
             service_type="codex_otp",
@@ -754,6 +842,7 @@ async def provision_codex_otp_service(request: CodexOtpProvisionRequest):
             "cloudflare": result.cloudflare,
             "next_steps": result.next_steps,
             "base_url": result.service_config.get("base_url") or None,
+            "steps": result.steps,
         }
 
 

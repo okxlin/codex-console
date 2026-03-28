@@ -29,6 +29,7 @@ let availableServices = {
     moe_mail: { available: false, services: [] },
     temp_mail: { available: false, services: [] },
     codex_otp: { available: false, services: [] },
+    codex_otp_d1: { available: false, services: [] },
     duck_mail: { available: false, services: [] },
     freemail: { available: false, services: [] }
 };
@@ -429,6 +430,24 @@ function updateEmailServiceOptions() {
         select.appendChild(optgroup);
     }
 
+    if (availableServices.codex_otp_d1 && availableServices.codex_otp_d1.available) {
+        const optgroup = document.createElement('optgroup');
+        optgroup.label = `🗄️ Codex OTP D1 (${availableServices.codex_otp_d1.count} 个服务)`;
+
+        availableServices.codex_otp_d1.services.forEach(service => {
+            const option = document.createElement('option');
+            option.value = `codex_otp_d1:${service.id || 'default'}`;
+            option.textContent = service.name + (service.domain ? ` (@${service.domain})` : '');
+            option.dataset.type = 'codex_otp_d1';
+            if (service.id) {
+                option.dataset.serviceId = service.id;
+            }
+            optgroup.appendChild(option);
+        });
+
+        select.appendChild(optgroup);
+    }
+
     // DuckMail
     if (availableServices.duck_mail && availableServices.duck_mail.available) {
         const optgroup = document.createElement('optgroup');
@@ -511,6 +530,11 @@ function handleServiceChange(e) {
         const service = availableServices.codex_otp.services.find(s => (s.id || 'default') == id);
         if (service) {
             addLog('info', `[系统] 已选择 Codex OTP 服务: ${service.name}`);
+        }
+    } else if (type === 'codex_otp_d1') {
+        const service = availableServices.codex_otp_d1.services.find(s => (s.id || 'default') == id);
+        if (service) {
+            addLog('info', `[系统] 已选择 Codex OTP D1 服务: ${service.name}`);
         }
     } else if (type === 'duck_mail') {
         const service = availableServices.duck_mail.services.find(s => s.id == id);
