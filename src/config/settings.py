@@ -728,18 +728,27 @@ def _save_settings_to_db(**kwargs) -> None:
     from ..database.session import get_db
     from ..database.crud import set_setting
 
-    with get_db() as db:
-        for attr_name, value in kwargs.items():
-            if attr_name in SETTING_DEFINITIONS:
-                defn = SETTING_DEFINITIONS[attr_name]
-                str_value = _value_to_string(value)
-                set_setting(
-                    db,
-                    defn.db_key,
-                    str_value,
-                    category=defn.category.value,
-                    description=defn.description
-                )
+    global _pending_db_settings
+    try:
+        with get_db() as db:
+            for attr_name, value in kwargs.items():
+                if attr_name in SETTING_DEFINITIONS:
+                    defn = SETTING_DEFINITIONS[attr_name]
+                    str_value = _value_to_string(value)
+                    set_setting(
+                        db,
+                        defn.db_key,
+                        str_value,
+                        category=defn.category.value,
+                        description=defn.description
+                    )
+            for attr_name in kwargs:
+                _pending_db_settings.pop(attr_name, None)
+    except RuntimeError as exc:
+        if "数据库未初始化" in str(exc):
+            _pending_db_settings.update(kwargs)
+            return
+        raise
 
 
 class Settings(BaseModel):
@@ -892,6 +901,16 @@ class Settings(BaseModel):
 # 全局配置实例
 _settings: Optional[Settings] = None
 _settings_lock = threading.RLock()
+_pending_db_settings: Dict[str, Any] = {}
+
+
+def _flush_pending_settings_to_db() -> None:
+    global _pending_db_settings
+    if not _pending_db_settings:
+        return
+    pending = dict(_pending_db_settings)
+    _save_settings_to_db(**pending)
+    _pending_db_settings.clear()
 
 
 def get_settings() -> Settings:
@@ -905,6 +924,7 @@ def get_settings() -> Settings:
             init_default_settings()
             settings_dict = _load_settings_from_db()
             _settings = Settings(**settings_dict)
+            _flush_pending_settings_to_db()
         return _settings
 
 

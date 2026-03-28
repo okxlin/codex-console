@@ -16,7 +16,7 @@ from ..database import crud
 from ..database.models import Account
 from ..database.crud import set_setting
 from ..database.session import get_db
-from ..web.routes.accounts import clear_current_account_selection_if_matches
+from ..core.current_account import clear_current_account_selection_if_matches
 
 logger = logging.getLogger(__name__)
 ACCOUNT_MAINTENANCE_CHANNEL = "account-maintenance"
