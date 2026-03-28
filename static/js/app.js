@@ -523,7 +523,6 @@ function handleModeChange(e) {
 
     if (isAutoMode) {
         elements.cancelBtn.disabled = false;
-        startAutoRegistrationMonitor();
     } else {
         stopAutoRegistrationMonitor();
         updateAutoMonitorHeader('idle', null);
@@ -2083,12 +2082,7 @@ async function restoreActiveTask() {
             sessionStorage.removeItem('activeTask');
         }
     } else if (mode === 'auto') {
-        elements.regMode.value = 'auto';
-        handleModeChange({ target: elements.regMode });
-        autoMonitorLastLogIndex = 0;
-        displayedLogs.clear();
-        addLog('info', '[系统] 正在恢复自动注册监控...');
-        startAutoRegistrationMonitor();
+        sessionStorage.removeItem('activeTask');
     }
 }
 
