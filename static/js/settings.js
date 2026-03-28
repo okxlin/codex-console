@@ -80,6 +80,8 @@ const elements = {
 };
 
 let maintenanceSocket = null;
+let maintenanceFormDirty = false;
+let settingsCache = null;
 
 // 选中的服务 ID
 let selectedServiceIds = new Set();
@@ -126,6 +128,11 @@ function initEventListeners() {
     if (elements.runMaintenanceNowBtn) {
         elements.runMaintenanceNowBtn.addEventListener('click', handleRunMaintenanceNow);
     }
+    const maintenanceScheduleMode = document.getElementById('maintenance-schedule-mode');
+    if (maintenanceScheduleMode) {
+        maintenanceScheduleMode.addEventListener('change', syncMaintenanceScheduleMode);
+    }
+    bindMaintenanceFormDirtyTracking();
 
     // 备份数据库
     if (elements.backupBtn) {
@@ -338,6 +345,7 @@ async function loadSettings() {
     try {
         const data = await api.get('/settings');
         const cpaServices = await api.get('/cpa-services');
+        settingsCache = data;
 
         // 动态代理设置
         document.getElementById('dynamic-proxy-enabled').checked = data.proxy?.dynamic_enabled || false;
@@ -354,19 +362,26 @@ async function loadSettings() {
         document.getElementById('registration-entry-flow').value = entryFlow;
         document.getElementById('sleep-min').value = data.registration?.sleep_min || 5;
         document.getElementById('sleep-max').value = data.registration?.sleep_max || 30;
-        document.getElementById('maintenance-enabled').value = String(Boolean(data.registration?.maintenance_enabled));
-        document.getElementById('maintenance-schedule-time').value = data.registration?.maintenance_schedule_time || '03:00';
-        document.getElementById('maintenance-validation-proxy').value = data.registration?.maintenance_validation_proxy || '';
-        document.getElementById('maintenance-cleanup-local').value = String(Boolean(data.registration?.maintenance_cleanup_local));
-        document.getElementById('maintenance-cleanup-remote-cpa').value = String(Boolean(data.registration?.maintenance_cleanup_remote_cpa));
+        if (!maintenanceFormDirty) {
+            document.getElementById('maintenance-enabled').value = String(Boolean(data.registration?.maintenance_enabled));
+            document.getElementById('maintenance-schedule-mode').value = data.registration?.maintenance_schedule_mode || 'daily';
+            document.getElementById('maintenance-schedule-time').value = data.registration?.maintenance_schedule_time || '03:00';
+            document.getElementById('maintenance-schedule-cron').value = data.registration?.maintenance_schedule_cron || '0 3 * * *';
+            document.getElementById('maintenance-validation-proxy').value = data.registration?.maintenance_validation_proxy || '';
+            document.getElementById('maintenance-validation-interval-minutes').value = data.registration?.maintenance_validation_interval_minutes || 1440;
+            document.getElementById('maintenance-debug-enabled').value = String(Boolean(data.registration?.maintenance_debug_enabled));
+            document.getElementById('maintenance-cleanup-local').value = String(Boolean(data.registration?.maintenance_cleanup_local));
+            document.getElementById('maintenance-cleanup-remote-cpa').value = String(Boolean(data.registration?.maintenance_cleanup_remote_cpa));
 
-        const maintenanceCpaSelect = document.getElementById('maintenance-cpa-service-id');
-        if (maintenanceCpaSelect) {
-            const currentValue = Number(data.registration?.maintenance_cpa_service_id || 0);
-            maintenanceCpaSelect.innerHTML = ['<option value="0">请选择 CPA 服务</option>']
-                .concat((cpaServices || []).map(service => `<option value="${service.id}">${escapeHtml(service.name)} (#${service.id})</option>`))
-                .join('');
-            maintenanceCpaSelect.value = String(currentValue);
+            const maintenanceCpaSelect = document.getElementById('maintenance-cpa-service-id');
+            if (maintenanceCpaSelect) {
+                const currentValue = Number(data.registration?.maintenance_cpa_service_id || 0);
+                maintenanceCpaSelect.innerHTML = ['<option value="0">请选择 CPA 服务</option>']
+                    .concat((cpaServices || []).map(service => `<option value="${service.id}">${escapeHtml(service.name)} (#${service.id})</option>`))
+                    .join('');
+                maintenanceCpaSelect.value = String(currentValue);
+            }
+            syncMaintenanceScheduleMode();
         }
         renderMaintenanceState(data.registration?.maintenance_state || null);
         renderPersistedMaintenanceLogs(data.registration?.maintenance_logs || []);
@@ -546,8 +561,12 @@ async function handleSaveRegistration(e) {
         auto_mode: registrationState?.auto_mode || 'pipeline',
         auto_cpa_service_id: parseInt(registrationState?.auto_cpa_service_id || 0, 10),
         maintenance_enabled: document.getElementById('maintenance-enabled').value === 'true',
+        maintenance_schedule_mode: document.getElementById('maintenance-schedule-mode').value || 'daily',
         maintenance_schedule_time: document.getElementById('maintenance-schedule-time').value || '03:00',
+        maintenance_schedule_cron: document.getElementById('maintenance-schedule-cron').value.trim() || '0 3 * * *',
         maintenance_validation_proxy: document.getElementById('maintenance-validation-proxy').value.trim(),
+        maintenance_validation_interval_minutes: parseInt(document.getElementById('maintenance-validation-interval-minutes').value || '1440', 10),
+        maintenance_debug_enabled: document.getElementById('maintenance-debug-enabled').value === 'true',
         maintenance_cleanup_local: document.getElementById('maintenance-cleanup-local').value === 'true',
         maintenance_cleanup_remote_cpa: document.getElementById('maintenance-cleanup-remote-cpa').value === 'true',
         maintenance_cpa_service_id: parseInt(document.getElementById('maintenance-cpa-service-id').value || '0', 10),
@@ -555,6 +574,7 @@ async function handleSaveRegistration(e) {
 
     try {
         await api.post('/settings/registration', data);
+        maintenanceFormDirty = false;
         toast.success('注册配置已保存');
         await loadSettings();
     } catch (error) {
@@ -568,16 +588,63 @@ function renderMaintenanceState(state) {
         elements.maintenanceState.textContent = '未加载';
         return;
     }
+    const statusTextMap = {
+        idle: '空闲',
+        disabled: '已禁用',
+        running: '运行中',
+        completed: '已完成',
+        cancelled: '已取消',
+        error: '异常',
+        catching_up: '补执行中',
+        cancelling: '取消中',
+    };
+    const registration = settingsCache?.registration || {};
     const summary = state.last_summary || {};
+    const scheduleMode = registration.maintenance_schedule_mode || 'daily';
+    const scheduleLabel = scheduleMode === 'cron'
+        ? `计划: Cron (${registration.maintenance_schedule_cron || '未设置'})`
+        : (registration.maintenance_schedule_time ? `计划时间(每天 HH:MM): ${registration.maintenance_schedule_time}` : null);
     const parts = [
-        `状态: ${state.status || 'idle'}`,
-        state.schedule_time ? `计划时间: ${state.schedule_time}` : null,
+        `状态: ${statusTextMap[state.status] || state.status || '空闲'}`,
+        scheduleLabel,
         state.last_run_at ? `最近执行: ${format.date(state.last_run_at)}` : null,
         state.next_run_at ? `下次执行: ${format.date(state.next_run_at)}` : null,
-        summary.total_accounts != null ? `最近统计: 总数 ${summary.total_accounts}, 有效 ${summary.valid_count || 0}, 无效 ${summary.invalid_count || 0}, 本地清理 ${summary.local_deleted_count || 0}, 远端清理 ${summary.remote_deleted_count || 0}` : null,
+        summary.total_accounts != null ? `最近统计: 总数 ${summary.total_accounts}, 有效 ${summary.valid_count || 0}, 无效 ${summary.invalid_count || 0}, 跳过 ${summary.skipped_count || 0}, 本地清理 ${summary.local_deleted_count || 0}, 远端清理 ${summary.remote_deleted_count || 0}` : null,
         state.message || null,
     ].filter(Boolean);
     elements.maintenanceState.textContent = parts.join(' | ');
+}
+
+function syncMaintenanceScheduleMode() {
+    const mode = document.getElementById('maintenance-schedule-mode')?.value || 'daily';
+    const dailyGroup = document.getElementById('maintenance-schedule-time-group');
+    const cronGroup = document.getElementById('maintenance-schedule-cron-group');
+    if (dailyGroup) dailyGroup.style.display = mode === 'daily' ? '' : 'none';
+    if (cronGroup) cronGroup.style.display = mode === 'cron' ? '' : 'none';
+}
+
+function bindMaintenanceFormDirtyTracking() {
+    const ids = [
+        'maintenance-enabled',
+        'maintenance-schedule-mode',
+        'maintenance-schedule-time',
+        'maintenance-schedule-cron',
+        'maintenance-validation-proxy',
+        'maintenance-validation-interval-minutes',
+        'maintenance-debug-enabled',
+        'maintenance-cleanup-local',
+        'maintenance-cleanup-remote-cpa',
+        'maintenance-cpa-service-id',
+    ];
+    ids.forEach((id) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const markDirty = () => {
+            maintenanceFormDirty = true;
+        };
+        el.addEventListener('change', markDirty);
+        el.addEventListener('input', markDirty);
+    });
 }
 
 function appendMaintenanceLog(message) {
@@ -617,7 +684,7 @@ function initMaintenanceSocket() {
                 appendMaintenanceLog(payload.message);
             }
             if (payload.type === 'status') {
-                loadSettings().catch(error => console.warn('刷新维护状态失败:', error));
+                renderMaintenanceState(payload.status || null);
             }
             if (payload.type === 'ping') {
                 maintenanceSocket.send(JSON.stringify({ type: 'ping' }));

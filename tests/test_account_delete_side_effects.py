@@ -1,6 +1,8 @@
 from contextlib import contextmanager
 from pathlib import Path
 
+from sqlalchemy import text
+
 from src.database.models import Account, Base, BindCardTask, Setting
 from src.database.session import DatabaseSessionManager
 from src.web.routes import accounts as accounts_routes
@@ -149,3 +151,42 @@ def test_delete_accounts_batch_clears_current_account_setting(tmp_path):
         assert setting is not None
         assert setting.value == ""
     assert not snapshot.exists()
+
+
+def test_migrate_tables_adds_bind_card_task_snapshot_columns(tmp_path):
+    db_path = tmp_path / "legacy_bind_card_task.db"
+    manager = DatabaseSessionManager(f"sqlite:///{db_path}")
+
+    with manager.engine.begin() as conn:
+        conn.execute(text(
+            "CREATE TABLE bind_card_tasks ("
+            "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+            "account_id INTEGER, "
+            "plan_type VARCHAR(20) NOT NULL, "
+            "workspace_name VARCHAR(255), "
+            "price_interval VARCHAR(20), "
+            "seat_quantity INTEGER, "
+            "country VARCHAR(10), "
+            "currency VARCHAR(10), "
+            "checkout_url TEXT NOT NULL, "
+            "checkout_source VARCHAR(50), "
+            "status VARCHAR(20), "
+            "last_error TEXT, "
+            "opened_at DATETIME, "
+            "last_checked_at DATETIME, "
+            "completed_at DATETIME, "
+            "created_at DATETIME, "
+            "updated_at DATETIME"
+            ")"
+        ))
+
+    manager.migrate_tables()
+
+    with manager.engine.connect() as conn:
+        columns = {
+            row[1]
+            for row in conn.execute(text("SELECT * FROM pragma_table_info('bind_card_tasks')")).fetchall()
+        }
+
+    assert "account_email_snapshot" in columns
+    assert "account_label_snapshot" in columns

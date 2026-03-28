@@ -51,6 +51,7 @@ class Account(Base):
     registered_at = Column(DateTime, default=utcnow)
     last_refresh = Column(DateTime)  # 最后刷新时间
     expires_at = Column(DateTime)  # Token 过期时间
+    last_maintenance_checked_at = Column(DateTime)  # 自动维护最近校验时间
     status = Column(String(20), default='active')  # 'active', 'expired', 'banned', 'failed'
     extra_data = Column(JSONEncodedDict)  # 额外信息存储
     cpa_uploaded = Column(Boolean, default=False)  # 是否已上传到 CPA

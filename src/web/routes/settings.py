@@ -4,10 +4,12 @@
 
 import logging
 import os
+from pathlib import Path
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, UploadFile, File
 from pydantic import BaseModel
+from sqlalchemy import text
 
 from ...config.settings import get_settings, update_settings
 from ...core.auto_registration import (
@@ -15,6 +17,7 @@ from ...core.auto_registration import (
     update_auto_registration_state,
 )
 from ...core.account_maintenance import (
+    _should_skip_validation,
     compute_next_run_at,
     get_account_maintenance_state,
     get_persisted_account_maintenance_logs,
@@ -23,6 +26,7 @@ from ...core.account_maintenance import (
     trigger_account_maintenance_reconfigure,
     trigger_account_maintenance_run,
 )
+from ...core.upload.cpa_upload import _match_auth_file_name, list_cpa_auth_files, probe_cpaproxyapi_compatibility
 from ...database import crud
 from ...database.session import get_db
 from ...services import EmailServiceType
@@ -76,8 +80,12 @@ class RegistrationSettings(BaseModel):
     auto_mode: str = "pipeline"
     auto_cpa_service_id: int = 0
     maintenance_enabled: bool = False
+    maintenance_schedule_mode: str = "daily"
     maintenance_schedule_time: str = "03:00"
+    maintenance_schedule_cron: str = "0 3 * * *"
     maintenance_validation_proxy: Optional[str] = None
+    maintenance_validation_interval_minutes: int = 1440
+    maintenance_debug_enabled: bool = False
     maintenance_cleanup_local: bool = False
     maintenance_cleanup_remote_cpa: bool = False
     maintenance_cpa_service_id: int = 0
@@ -89,6 +97,14 @@ class WebUISettings(BaseModel):
     port: Optional[int] = None
     debug: Optional[bool] = None
     access_password: Optional[str] = None
+
+
+class AccountMaintenanceDebugRequest(BaseModel):
+    """账号自动维护调试请求"""
+    account_id: Optional[int] = None
+    email: Optional[str] = None
+    inspect_remote: bool = True
+    include_accounts_sample: int = 20
 
 
 class AllSettings(BaseModel):
@@ -141,8 +157,12 @@ async def get_all_settings():
             "auto_mode": settings.registration_auto_mode,
             "auto_cpa_service_id": settings.registration_auto_cpa_service_id,
             "maintenance_enabled": settings.account_maintenance_enabled,
+            "maintenance_schedule_mode": settings.account_maintenance_schedule_mode,
             "maintenance_schedule_time": settings.account_maintenance_schedule_time,
+            "maintenance_schedule_cron": settings.account_maintenance_schedule_cron,
             "maintenance_validation_proxy": settings.account_maintenance_validation_proxy,
+            "maintenance_validation_interval_minutes": settings.account_maintenance_validation_interval_minutes,
+            "maintenance_debug_enabled": settings.account_maintenance_debug_enabled,
             "maintenance_cleanup_local": settings.account_maintenance_cleanup_local,
             "maintenance_cleanup_remote_cpa": settings.account_maintenance_cleanup_remote_cpa,
             "maintenance_cpa_service_id": settings.account_maintenance_cpa_service_id,
@@ -290,8 +310,12 @@ async def get_registration_settings():
         "auto_mode": settings.registration_auto_mode,
         "auto_cpa_service_id": settings.registration_auto_cpa_service_id,
         "maintenance_enabled": settings.account_maintenance_enabled,
+        "maintenance_schedule_mode": settings.account_maintenance_schedule_mode,
         "maintenance_schedule_time": settings.account_maintenance_schedule_time,
+        "maintenance_schedule_cron": settings.account_maintenance_schedule_cron,
         "maintenance_validation_proxy": settings.account_maintenance_validation_proxy,
+        "maintenance_validation_interval_minutes": settings.account_maintenance_validation_interval_minutes,
+        "maintenance_debug_enabled": settings.account_maintenance_debug_enabled,
         "maintenance_cleanup_local": settings.account_maintenance_cleanup_local,
         "maintenance_cleanup_remote_cpa": settings.account_maintenance_cleanup_remote_cpa,
         "maintenance_cpa_service_id": settings.account_maintenance_cpa_service_id,
@@ -345,10 +369,21 @@ async def update_registration_settings(request: RegistrationSettings):
     if request.auto_enabled and request.auto_cpa_service_id <= 0:
         raise HTTPException(status_code=400, detail="启用自动注册时必须选择一个 CPA 服务")
 
+    request.maintenance_schedule_mode = str(request.maintenance_schedule_mode or "daily").strip().lower()
+    if request.maintenance_schedule_mode not in {"daily", "cron"}:
+        raise HTTPException(status_code=400, detail="自动维护调度模式只支持 daily 或 cron")
+
     try:
-        compute_next_run_at(request.maintenance_schedule_time)
+        compute_next_run_at(
+            request.maintenance_schedule_time,
+            schedule_mode=request.maintenance_schedule_mode,
+            schedule_cron=request.maintenance_schedule_cron,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if request.maintenance_validation_interval_minutes < 5 or request.maintenance_validation_interval_minutes > 10080:
+        raise HTTPException(status_code=400, detail="账号有效性校验间隔必须在 5-10080 分钟之间")
 
     with get_db() as db:
         if request.auto_enabled:
@@ -392,18 +427,38 @@ async def update_registration_settings(request: RegistrationSettings):
         registration_auto_mode=request.auto_mode,
         registration_auto_cpa_service_id=max(0, request.auto_cpa_service_id),
         account_maintenance_enabled=request.maintenance_enabled,
+        account_maintenance_schedule_mode=request.maintenance_schedule_mode,
         account_maintenance_schedule_time=request.maintenance_schedule_time.strip(),
+        account_maintenance_schedule_cron=request.maintenance_schedule_cron.strip(),
         account_maintenance_validation_proxy=(request.maintenance_validation_proxy or "").strip(),
+        account_maintenance_validation_interval_minutes=request.maintenance_validation_interval_minutes,
+        account_maintenance_debug_enabled=request.maintenance_debug_enabled,
         account_maintenance_cleanup_local=request.maintenance_cleanup_local,
         account_maintenance_cleanup_remote_cpa=request.maintenance_cleanup_remote_cpa,
         account_maintenance_cpa_service_id=max(0, request.maintenance_cpa_service_id),
     )
+    maintenance_next_run_at = None
+    maintenance_status = "disabled"
+    maintenance_message = "账号自动维护已禁用"
+    if request.maintenance_enabled:
+        maintenance_next_run_at = compute_next_run_at(
+            request.maintenance_schedule_time,
+            schedule_mode=request.maintenance_schedule_mode,
+            schedule_cron=request.maintenance_schedule_cron,
+        ).isoformat()
+        maintenance_status = "idle"
+        maintenance_message = "等待计划执行"
+
+    update_account_maintenance_state(
+        status=maintenance_status,
+        message=maintenance_message,
+        next_run_at=maintenance_next_run_at,
+    )
+
     if not request.maintenance_enabled:
         update_account_maintenance_state(
-            enabled=False,
             status="disabled",
             message="账号自动维护已禁用",
-            schedule_time=request.maintenance_schedule_time.strip(),
             next_run_at=None,
         )
     trigger_account_maintenance_reconfigure()
@@ -440,6 +495,183 @@ async def run_account_maintenance_now():
     return {"success": True, "message": "已触发账号自动验证与清理"}
 
 
+@router.post("/registration/maintenance/debug")
+async def debug_account_maintenance(request: AccountMaintenanceDebugRequest):
+    """调试账号自动维护在本地/远端清理前的关键依赖。"""
+    settings = get_settings()
+    if not bool(settings.account_maintenance_debug_enabled):
+        raise HTTPException(status_code=403, detail="账号自动维护调试接口未启用")
+    email_text = str(request.email or "").strip()
+    include_accounts_sample = max(0, min(int(request.include_accounts_sample or 0), 100))
+
+    with get_db() as db:
+        account = None
+        if request.account_id:
+            account = crud.get_account_by_id(db, request.account_id)
+        if account is None and email_text:
+            account = crud.get_account_by_email(db, email_text)
+        maintenance_state = get_account_maintenance_state() or get_persisted_account_maintenance_state()
+
+        cpa_service_id = int(settings.account_maintenance_cpa_service_id or 0)
+        cpa_service = crud.get_cpa_service_by_id(db, cpa_service_id) if cpa_service_id > 0 else None
+        bind_card_task_columns = [
+            row[1]
+            for row in db.execute(text("SELECT * FROM pragma_table_info('bind_card_tasks')")).fetchall()
+        ]
+        bind_card_task_count = None
+        if account is not None:
+            bind_card_task_count = db.execute(
+                text("SELECT COUNT(1) FROM bind_card_tasks WHERE account_id = :account_id"),
+                {"account_id": account.id},
+            ).scalar() or 0
+
+        total_accounts = db.execute(text("SELECT COUNT(1) FROM accounts")).scalar() or 0
+        invalid_accounts = db.execute(
+            text("SELECT COUNT(1) FROM accounts WHERE status IN ('failed', 'expired', 'banned')")
+        ).scalar() or 0
+        invalid_accounts_sample = []
+        if include_accounts_sample > 0:
+            invalid_accounts_sample = [
+                {
+                    "id": row[0],
+                    "email": row[1],
+                    "status": row[2],
+                    "has_bind_card_tasks": bool(row[3]),
+                }
+                for row in db.execute(
+                    text(
+                        "SELECT a.id, a.email, a.status, "
+                        "EXISTS(SELECT 1 FROM bind_card_tasks b WHERE b.account_id = a.id) AS has_bind_card_tasks "
+                        "FROM accounts a "
+                        "WHERE a.status IN ('failed', 'expired', 'banned') "
+                        "ORDER BY a.id ASC LIMIT :limit"
+                    ),
+                    {"limit": include_accounts_sample},
+                ).fetchall()
+            ]
+
+    required_columns = ["account_email_snapshot", "account_label_snapshot"]
+    missing_columns = [column for column in required_columns if column not in bind_card_task_columns]
+    validation_interval_minutes = int(settings.account_maintenance_validation_interval_minutes or 0)
+    account_runtime_debug = None
+    if account is not None:
+        last_checked_at = getattr(account, "last_maintenance_checked_at", None)
+        account_runtime_debug = {
+            "last_maintenance_checked_at": last_checked_at.isoformat() if last_checked_at else None,
+            "validation_interval_minutes": validation_interval_minutes,
+            "would_skip_validation_now": _should_skip_validation(account, validation_interval_minutes),
+            "maintenance_status": maintenance_state.get("status") if isinstance(maintenance_state, dict) else None,
+            "maintenance_message": maintenance_state.get("message") if isinstance(maintenance_state, dict) else None,
+            "maintenance_last_run_at": maintenance_state.get("last_run_at") if isinstance(maintenance_state, dict) else None,
+            "maintenance_next_run_at": maintenance_state.get("next_run_at") if isinstance(maintenance_state, dict) else None,
+            "last_summary": maintenance_state.get("last_summary") if isinstance(maintenance_state, dict) else None,
+        }
+
+    remote_debug = {
+        "enabled": bool(settings.account_maintenance_cleanup_remote_cpa),
+        "inspect_requested": bool(request.inspect_remote),
+        "cpa_service_id": cpa_service_id,
+        "service_found": cpa_service is not None,
+        "service_enabled": bool(getattr(cpa_service, "enabled", False)) if cpa_service is not None else False,
+        "api_url": getattr(cpa_service, "api_url", None) if cpa_service is not None else None,
+        "proxy_url": getattr(cpa_service, "proxy_url", None) if cpa_service is not None else None,
+        "normalized_email": str(account.email or "").strip().lower() if account is not None else None,
+        "list_ok": None,
+        "match_filename": None,
+        "matched_candidates": [],
+        "message": None,
+        "compatibility_probe": None,
+    }
+
+    if not settings.account_maintenance_cleanup_remote_cpa:
+        remote_debug["message"] = "当前未启用远端 CPA 清理"
+    elif cpa_service is None:
+        remote_debug["message"] = "当前配置的 CPA 服务不存在"
+    elif not getattr(cpa_service, "enabled", False):
+        remote_debug["message"] = "当前配置的 CPA 服务已禁用"
+    elif not request.inspect_remote:
+        remote_debug["message"] = "已跳过远端接口探测"
+    elif account is None:
+        remote_debug["message"] = "未指定账号，返回全局远端调试信息"
+    elif not account.email:
+        remote_debug["message"] = "账号邮箱为空，无法匹配远端 auth-file"
+    else:
+        success, payload, message = list_cpa_auth_files(
+            cpa_service.api_url,
+            cpa_service.api_token,
+            proxy_url=getattr(cpa_service, "proxy_url", None),
+        )
+        remote_debug["list_ok"] = success
+        remote_debug["message"] = message
+        if success:
+            remote_debug["match_filename"] = _match_auth_file_name(payload, account.email)
+            names = []
+            if isinstance(payload, dict):
+                files = payload.get("files", [])
+            elif isinstance(payload, list):
+                files = payload
+            else:
+                files = []
+            target = str(account.email or "").strip().lower()
+            for item in files:
+                if not isinstance(item, dict):
+                    continue
+                candidate = str(
+                    item.get("name") or item.get("filename") or item.get("file_name") or item.get("path") or ""
+                ).strip()
+                if candidate and target and target in candidate.lower():
+                    names.append(candidate)
+            remote_debug["matched_candidates"] = names[:20]
+        remote_debug["compatibility_probe"] = probe_cpaproxyapi_compatibility(
+            cpa_service.api_url,
+            cpa_service.api_token,
+            email=account.email if account is not None else None,
+            proxy_url=getattr(cpa_service, "proxy_url", None),
+        )
+
+    local_debug = {
+        "enabled": bool(settings.account_maintenance_cleanup_local),
+        "bind_card_task_count": int(bind_card_task_count or 0) if account is not None else None,
+        "bind_card_task_columns": bind_card_task_columns,
+        "missing_columns": missing_columns,
+        "can_delete_locally": not missing_columns,
+        "message": None,
+    }
+    if missing_columns:
+        local_debug["message"] = f"bind_card_tasks 缺少列: {', '.join(missing_columns)}"
+    else:
+        local_debug["message"] = "本地删除所需的 bind_card_tasks 快照列已齐全"
+
+    return {
+        "success": True,
+        "mode": "account" if account is not None else "global",
+        "account": {
+            "id": account.id,
+            "email": account.email,
+            "status": account.status,
+        } if account is not None else None,
+        "maintenance_settings": {
+            "enabled": bool(settings.account_maintenance_enabled),
+            "schedule_time": settings.account_maintenance_schedule_time,
+            "validation_interval_minutes": validation_interval_minutes,
+            "cleanup_local": bool(settings.account_maintenance_cleanup_local),
+            "cleanup_remote_cpa": bool(settings.account_maintenance_cleanup_remote_cpa),
+            "maintenance_cpa_service_id": cpa_service_id,
+        },
+        "global_debug": {
+            "total_accounts": int(total_accounts),
+            "invalid_accounts": int(invalid_accounts),
+            "invalid_accounts_sample": invalid_accounts_sample,
+        },
+        "account_runtime_debug": account_runtime_debug,
+        "local_debug": local_debug,
+        "remote_debug": remote_debug,
+        "would_skip_local_delete_if_remote_fails": bool(
+            settings.account_maintenance_cleanup_local and settings.account_maintenance_cleanup_remote_cpa
+        ),
+    }
+
+
 @router.post("/webui")
 async def update_webui_settings(request: WebUISettings):
     """更新 Web UI 设置"""
@@ -467,8 +699,6 @@ async def get_database_info():
     settings = get_settings()
 
     import os
-    from pathlib import Path
-
     db_path = settings.database_url
     if db_path.startswith("sqlite:///"):
         db_path = db_path[10:]
