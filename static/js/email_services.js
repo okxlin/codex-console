@@ -4,7 +4,7 @@
 
 // 状态
 let outlookServices = [];
-let customServices = [];  // 合并 moe_mail + temp_mail + duck_mail + freemail + imap_mail
+let customServices = [];  // 合并 moe_mail + temp_mail + codex_otp + duck_mail + freemail + imap_mail
 let selectedOutlook = new Set();
 let selectedCustom = new Set();
 
@@ -13,6 +13,7 @@ const elements = {
     // 统计
     outlookCount: document.getElementById('outlook-count'),
     customCount: document.getElementById('custom-count'),
+    codexOtpCount: document.getElementById('codex-otp-count'),
     tempmailStatus: document.getElementById('tempmail-status'),
     totalEnabled: document.getElementById('total-enabled'),
 
@@ -57,6 +58,7 @@ const elements = {
     addMoemailFields: document.getElementById('add-moemail-fields'),
     addYydsMailFields: document.getElementById('add-yydsmail-fields'),
     addTempmailFields: document.getElementById('add-tempmail-fields'),
+    addCodexOtpFields: document.getElementById('add-codexotp-fields'),
     addDuckmailFields: document.getElementById('add-duckmail-fields'),
     addFreemailFields: document.getElementById('add-freemail-fields'),
     addImapFields: document.getElementById('add-imap-fields'),
@@ -69,11 +71,20 @@ const elements = {
     editMoemailFields: document.getElementById('edit-moemail-fields'),
     editYydsMailFields: document.getElementById('edit-yydsmail-fields'),
     editTempmailFields: document.getElementById('edit-tempmail-fields'),
+    editCodexOtpFields: document.getElementById('edit-codexotp-fields'),
     editDuckmailFields: document.getElementById('edit-duckmail-fields'),
     editFreemailFields: document.getElementById('edit-freemail-fields'),
     editImapFields: document.getElementById('edit-imap-fields'),
     editCustomTypeBadge: document.getElementById('edit-custom-type-badge'),
     editCustomSubTypeHidden: document.getElementById('edit-custom-sub-type-hidden'),
+
+    codexOtpProvisionBtn: document.getElementById('open-codex-otp-provision-btn'),
+    codexOtpProvisionModal: document.getElementById('codex-otp-provision-modal'),
+    codexOtpProvisionForm: document.getElementById('codex-otp-provision-form'),
+    closeCodexOtpProvisionModal: document.getElementById('close-codex-otp-provision-modal'),
+    cancelCodexOtpProvision: document.getElementById('cancel-codex-otp-provision'),
+    codexOtpProvisionSubmit: document.getElementById('codex-otp-provision-submit'),
+    codexOtpProvisionResult: document.getElementById('codex-otp-provision-result'),
 
     // 编辑 Outlook 模态框
     editOutlookModal: document.getElementById('edit-outlook-modal'),
@@ -86,6 +97,7 @@ const CUSTOM_SUBTYPE_LABELS = {
     yydsmail: 'YYDS Mail (YYDS Mail API)',
     moemail: '🔗 MoeMail（自定义域名 API）',
     tempmail: '📮 TempMail（自部署 Cloudflare Worker）',
+    codexotp: '🧩 Codex OTP（专用 OTP Worker）',
     duckmail: '🦆 DuckMail（DuckMail API）',
     freemail: 'Freemail（自部署 Cloudflare Worker）',
     imap: '📧 IMAP 邮箱（Gmail/QQ/163等）'
@@ -165,6 +177,17 @@ function initEventListeners() {
     elements.cancelEditOutlook.addEventListener('click', () => elements.editOutlookModal.classList.remove('active'));
     elements.editOutlookForm.addEventListener('submit', handleEditOutlook);
 
+    if (elements.codexOtpProvisionBtn) {
+        elements.codexOtpProvisionBtn.addEventListener('click', () => {
+            elements.codexOtpProvisionForm.reset();
+            elements.codexOtpProvisionResult.style.display = 'none';
+            elements.codexOtpProvisionModal.classList.add('active');
+        });
+        elements.closeCodexOtpProvisionModal.addEventListener('click', () => elements.codexOtpProvisionModal.classList.remove('active'));
+        elements.cancelCodexOtpProvision.addEventListener('click', () => elements.codexOtpProvisionModal.classList.remove('active'));
+        elements.codexOtpProvisionForm.addEventListener('submit', handleProvisionCodexOtp);
+    }
+
     // 临时邮箱配置
     elements.tempmailForm.addEventListener('submit', handleSaveTempmail);
     elements.testTempmailBtn.addEventListener('click', handleTestTempmail);
@@ -195,6 +218,7 @@ function switchAddSubType(subType) {
     elements.addMoemailFields.style.display = subType === 'moemail' ? '' : 'none';
     elements.addYydsMailFields.style.display = subType === 'yydsmail' ? '' : 'none';
     elements.addTempmailFields.style.display = subType === 'tempmail' ? '' : 'none';
+    elements.addCodexOtpFields.style.display = subType === 'codexotp' ? '' : 'none';
     elements.addDuckmailFields.style.display = subType === 'duckmail' ? '' : 'none';
     elements.addFreemailFields.style.display = subType === 'freemail' ? '' : 'none';
     elements.addImapFields.style.display = subType === 'imap' ? '' : 'none';
@@ -206,6 +230,7 @@ function switchEditSubType(subType) {
     elements.editMoemailFields.style.display = subType === 'moemail' ? '' : 'none';
     elements.editYydsMailFields.style.display = subType === 'yydsmail' ? '' : 'none';
     elements.editTempmailFields.style.display = subType === 'tempmail' ? '' : 'none';
+    elements.editCodexOtpFields.style.display = subType === 'codexotp' ? '' : 'none';
     elements.editDuckmailFields.style.display = subType === 'duckmail' ? '' : 'none';
     elements.editFreemailFields.style.display = subType === 'freemail' ? '' : 'none';
     elements.editImapFields.style.display = subType === 'imap' ? '' : 'none';
@@ -217,7 +242,10 @@ async function loadStats() {
     try {
         const data = await api.get('/email-services/stats');
         elements.outlookCount.textContent = data.outlook_count || 0;
-        elements.customCount.textContent = (data.custom_count || 0) + (data.yyds_mail_count || 0) + (data.temp_mail_count || 0) + (data.duck_mail_count || 0) + (data.freemail_count || 0) + (data.imap_mail_count || 0);
+        elements.customCount.textContent = (data.custom_count || 0) + (data.yyds_mail_count || 0) + (data.temp_mail_count || 0) + (data.codex_otp_count || 0) + (data.duck_mail_count || 0) + (data.freemail_count || 0) + (data.imap_mail_count || 0);
+        if (elements.codexOtpCount) {
+            elements.codexOtpCount.textContent = data.codex_otp_count || 0;
+        }
         elements.tempmailStatus.textContent = data.tempmail_available ? '可用' : '不可用';
         elements.totalEnabled.textContent = data.enabled_count || 0;
     } catch (error) {
@@ -317,6 +345,9 @@ function getCustomServiceTypeBadge(subType) {
     if (subType === 'tempmail') {
         return '<span class="status-badge warning">TempMail</span>';
     }
+    if (subType === 'codexotp') {
+        return '<span class="status-badge" style="background-color:#00695c;color:white;">Codex OTP</span>';
+    }
     if (subType === 'duckmail') {
         return '<span class="status-badge success">DuckMail</span>';
     }
@@ -332,6 +363,11 @@ function getCustomServiceAddress(service) {
         const emailAddr = service.config?.email || '';
         return `${escapeHtml(host)}<div style="color: var(--text-muted); margin-top: 4px;">${escapeHtml(emailAddr)}</div>`;
     }
+    if (service._subType === 'codexotp') {
+        const baseUrl = service.config?.base_url || '-';
+        const domain = service.config?.domain || '';
+        return `${escapeHtml(baseUrl)}<div style="color: var(--text-muted); margin-top: 4px;">OTP 域名：@${escapeHtml(domain)}</div>`;
+    }
     const baseUrl = service.config?.base_url || '-';
     const domain = service.config?.default_domain || service.config?.domain;
     if (!domain) {
@@ -340,13 +376,14 @@ function getCustomServiceAddress(service) {
     return `${escapeHtml(baseUrl)}<div style="color: var(--text-muted); margin-top: 4px;">默认域名：@${escapeHtml(domain)}</div>`;
 }
 
-// 加载自定义邮箱服务（moe_mail + temp_mail + duck_mail + freemail 合并）
+// 加载自定义邮箱服务（moe_mail + temp_mail + codex_otp + duck_mail + freemail 合并）
 async function loadCustomServices() {
     try {
-        const [r1, r2, r3, r4, r5, r6] = await Promise.all([
+        const [r1, r2, r3, r4, r5, r6, r7] = await Promise.all([
             api.get('/email-services?service_type=moe_mail'),
             api.get('/email-services?service_type=yyds_mail'),
             api.get('/email-services?service_type=temp_mail'),
+            api.get('/email-services?service_type=codex_otp'),
             api.get('/email-services?service_type=duck_mail'),
             api.get('/email-services?service_type=freemail'),
             api.get('/email-services?service_type=imap_mail')
@@ -355,9 +392,10 @@ async function loadCustomServices() {
             ...(r1.services || []).map(s => ({ ...s, _subType: 'moemail' })),
             ...(r2.services || []).map(s => ({ ...s, _subType: 'yydsmail' })),
             ...(r3.services || []).map(s => ({ ...s, _subType: 'tempmail' })),
-            ...(r4.services || []).map(s => ({ ...s, _subType: 'duckmail' })),
-            ...(r5.services || []).map(s => ({ ...s, _subType: 'freemail' })),
-            ...(r6.services || []).map(s => ({ ...s, _subType: 'imap' }))
+            ...(r4.services || []).map(s => ({ ...s, _subType: 'codexotp' })),
+            ...(r5.services || []).map(s => ({ ...s, _subType: 'duckmail' })),
+            ...(r6.services || []).map(s => ({ ...s, _subType: 'freemail' })),
+            ...(r7.services || []).map(s => ({ ...s, _subType: 'imap' }))
         ];
 
         if (customServices.length === 0) {
@@ -502,6 +540,16 @@ async function handleAddCustom(e) {
             domain: formData.get('tm_domain'),
             enable_prefix: true
         };
+    } else if (subType === 'codexotp') {
+        serviceType = 'codex_otp';
+        config = {
+            base_url: formData.get('codex_base_url'),
+            admin_token: formData.get('codex_admin_token'),
+            custom_auth: formData.get('codex_custom_auth'),
+            domain: formData.get('codex_domain'),
+            ttl_seconds: 1800,
+            poll_interval: 3
+        };
     } else if (subType === 'duckmail') {
         serviceType = 'duck_mail';
         config = {
@@ -530,6 +578,10 @@ async function handleAddCustom(e) {
 
     if (subType === 'yydsmail' && (!config.base_url || !config.api_key)) {
         toast.error('YYDS Mail 需要填写 API URL 和 API Key');
+        return;
+    }
+    if (subType === 'codexotp' && (!config.base_url || !config.admin_token || !config.domain)) {
+        toast.error('Codex OTP 需要填写 Worker 地址、Admin Token 和邮箱域名');
         return;
     }
 
@@ -732,6 +784,8 @@ async function editCustomService(id, subType) {
                 ? 'tempmail'
                 : service.service_type === 'yyds_mail'
                     ? 'yydsmail'
+                : service.service_type === 'codex_otp'
+                    ? 'codexotp'
                 : service.service_type === 'duck_mail'
                     ? 'duckmail'
                     : service.service_type === 'freemail'
@@ -763,6 +817,13 @@ async function editCustomService(id, subType) {
             document.getElementById('edit-tm-admin-password').value = '';
             document.getElementById('edit-tm-admin-password').placeholder = service.config?.admin_password ? '已设置，留空保持不变' : '请输入 Admin 密码';
             document.getElementById('edit-tm-domain').value = service.config?.domain || '';
+        } else if (resolvedSubType === 'codexotp') {
+            document.getElementById('edit-codex-base-url').value = service.config?.base_url || '';
+            document.getElementById('edit-codex-admin-token').value = '';
+            document.getElementById('edit-codex-admin-token').placeholder = service.config?.admin_token ? '已设置，留空保持不变' : '请输入 Admin Token';
+            document.getElementById('edit-codex-custom-auth').value = '';
+            document.getElementById('edit-codex-custom-auth').placeholder = service.config?.custom_auth ? '已设置，留空保持不变' : '可选';
+            document.getElementById('edit-codex-domain').value = service.config?.domain || '';
         } else if (resolvedSubType === 'duckmail') {
             document.getElementById('edit-dm-base-url').value = service.config?.base_url || '';
             document.getElementById('edit-dm-api-key').value = '';
@@ -819,6 +880,17 @@ async function handleEditCustom(e) {
         };
         const pwd = formData.get('tm_admin_password');
         if (pwd && pwd.trim()) config.admin_password = pwd.trim();
+    } else if (subType === 'codexotp') {
+        config = {
+            base_url: formData.get('codex_base_url'),
+            domain: formData.get('codex_domain'),
+            ttl_seconds: 1800,
+            poll_interval: 3
+        };
+        const token = formData.get('codex_admin_token');
+        const customAuth = formData.get('codex_custom_auth');
+        if (token && token.trim()) config.admin_token = token.trim();
+        if (customAuth && customAuth.trim()) config.custom_auth = customAuth.trim();
     } else if (subType === 'duckmail') {
         config = {
             base_url: formData.get('dm_base_url'),
@@ -916,5 +988,58 @@ async function handleEditOutlook(e) {
         loadStats();
     } catch (error) {
         toast.error('更新失败: ' + error.message);
+    }
+}
+
+async function handleProvisionCodexOtp(e) {
+    e.preventDefault();
+    const formData = new FormData(e.target);
+    const payload = {
+        service_name: formData.get('service_name'),
+        script_name: formData.get('script_name'),
+        database_name: formData.get('database_name'),
+        route_pattern: formData.get('route_pattern'),
+        email_domain: formData.get('email_domain'),
+        account_id: formData.get('account_id'),
+        api_token: formData.get('api_token'),
+        zone_id: formData.get('zone_id') || '',
+        admin_token: formData.get('admin_token') || '',
+        custom_auth: formData.get('custom_auth') || '',
+        ttl_seconds: parseInt(formData.get('ttl_seconds'), 10) || 1800,
+        code_retention_days: parseInt(formData.get('code_retention_days'), 10) || 2,
+        allow_override: formData.get('allow_override') === 'true',
+        enabled: true,
+        priority: 0
+    };
+
+    elements.codexOtpProvisionSubmit.disabled = true;
+    elements.codexOtpProvisionSubmit.textContent = '初始化中...';
+    elements.codexOtpProvisionResult.style.display = 'none';
+
+    try {
+        const result = await api.post('/email-services/codex-otp/provision', payload);
+        const nextSteps = (result.next_steps || []).map(item => `<li>${escapeHtml(item)}</li>`).join('');
+        elements.codexOtpProvisionResult.style.display = 'block';
+        elements.codexOtpProvisionResult.innerHTML = `
+            <div class="import-stats">
+                <span>✅ 服务已创建: <strong>${escapeHtml(result.service?.name || payload.service_name)}</strong></span>
+                <span>🗄️ D1: <strong>${escapeHtml(result.cloudflare?.database_name || payload.database_name)}</strong></span>
+            </div>
+            <div style="margin-top: var(--spacing-sm); color: var(--text-muted); font-size: 0.875rem;">
+                <div>Worker: <code>${escapeHtml(result.cloudflare?.worker_id || payload.script_name)}</code></div>
+                <div>Base URL: <code>${escapeHtml(result.base_url || result.service?.config?.base_url || '')}</code></div>
+            </div>
+            ${nextSteps ? `<div class="import-errors" style="margin-top: var(--spacing-sm);"><strong>后续步骤：</strong><ul>${nextSteps}</ul></div>` : ''}
+        `;
+        toast.success('Codex OTP 初始化成功');
+        loadCustomServices();
+        loadStats();
+    } catch (error) {
+        elements.codexOtpProvisionResult.style.display = 'block';
+        elements.codexOtpProvisionResult.innerHTML = `<div class="import-errors"><strong>初始化失败：</strong> ${escapeHtml(error.message)}</div>`;
+        toast.error('Codex OTP 初始化失败: ' + error.message);
+    } finally {
+        elements.codexOtpProvisionSubmit.disabled = false;
+        elements.codexOtpProvisionSubmit.textContent = '开始初始化';
     }
 }

@@ -49,6 +49,10 @@
                     <div class="stat-value" id="custom-count">0</div>
                     <div class="stat-label">自定义邮箱</div>
                 </div>
+                <div class="stat-card">
+                    <div class="stat-value" id="codex-otp-count">0</div>
+                    <div class="stat-label">Codex OTP</div>
+                </div>
                 <div class="stat-card warning">
                     <div class="stat-value" id="tempmail-status">可用</div>
                     <div class="stat-label">临时邮箱</div>
@@ -102,7 +106,10 @@
             <div class="card custom-email-services-card">
                 <div class="card-header">
                     <h3>🔗 自定义邮箱服务</h3>
-                    <button class="btn btn-primary btn-sm" id="add-custom-btn">➕ 添加服务</button>
+                    <div style="display:flex;gap:var(--spacing-sm);flex-wrap:wrap;">
+                        <button class="btn btn-secondary btn-sm" id="open-codex-otp-provision-btn">⚙️ 初始化 Codex OTP</button>
+                        <button class="btn btn-primary btn-sm" id="add-custom-btn">➕ 添加服务</button>
+                    </div>
                 </div>
                 <div class="card-body" style="padding: 0;">
                     <div class="table-container">
@@ -255,6 +262,7 @@
                             <option value="moemail">MoeMail（自定义域名 API）</option>
                             <option value="yydsmail">YYDS Mail (YYDS Mail API)</option>
                             <option value="tempmail">TempMail（自部署 Cloudflare Worker）</option>
+                            <option value="codexotp">Codex OTP（专用 OTP Worker）</option>
                             <option value="duckmail">DuckMail（DuckMail API）</option>
                             <option value="freemail">Freemail（自部署 Cloudflare Worker）</option>
                             <option value="imap">标准 IMAP（Gmail/QQ/163等）</option>
@@ -302,6 +310,24 @@
                         <div class="form-group">
                             <label for="custom-tm-domain">邮箱域名</label>
                             <input type="text" id="custom-tm-domain" name="tm_domain" placeholder="example.com">
+                        </div>
+                    </div>
+                    <div id="add-codexotp-fields" style="display:none;">
+                        <div class="form-group">
+                            <label for="custom-codex-base-url">Worker 地址</label>
+                            <input type="text" id="custom-codex-base-url" name="codex_base_url" placeholder="https://otp.example.com">
+                        </div>
+                        <div class="form-group">
+                            <label for="custom-codex-admin-token">Admin Token</label>
+                            <input type="password" id="custom-codex-admin-token" name="codex_admin_token" placeholder="x-admin-auth Token">
+                        </div>
+                        <div class="form-group">
+                            <label for="custom-codex-custom-auth">Custom Auth（可选）</label>
+                            <input type="password" id="custom-codex-custom-auth" name="codex_custom_auth" placeholder="额外访问口令">
+                        </div>
+                        <div class="form-group">
+                            <label for="custom-codex-domain">邮箱域名</label>
+                            <input type="text" id="custom-codex-domain" name="codex_domain" placeholder="mail.example.com">
                         </div>
                     </div>
                     <!-- DuckMail 字段 -->
@@ -455,6 +481,25 @@
                             <input type="text" id="edit-tm-domain" name="tm_domain" placeholder="example.com">
                         </div>
                     </div>
+                    <div id="edit-codexotp-fields" style="display:none;">
+                        <div class="form-group">
+                            <label for="edit-codex-base-url">Worker 地址</label>
+                            <input type="text" id="edit-codex-base-url" name="codex_base_url" placeholder="https://otp.example.com">
+                        </div>
+                        <div class="form-group">
+                            <label for="edit-codex-admin-token">Admin Token</label>
+                            <input type="password" id="edit-codex-admin-token" name="codex_admin_token" placeholder="留空则不修改">
+                            <small style="color: var(--text-muted);">留空则保持原值不变</small>
+                        </div>
+                        <div class="form-group">
+                            <label for="edit-codex-custom-auth">Custom Auth（可选）</label>
+                            <input type="password" id="edit-codex-custom-auth" name="codex_custom_auth" placeholder="留空则不修改">
+                        </div>
+                        <div class="form-group">
+                            <label for="edit-codex-domain">邮箱域名</label>
+                            <input type="text" id="edit-codex-domain" name="codex_domain" placeholder="mail.example.com">
+                        </div>
+                    </div>
                     <!-- DuckMail 字段 -->
                     <div id="edit-duckmail-fields" style="display:none;">
                         <div class="form-group">
@@ -585,6 +630,90 @@
                         <button type="submit" class="btn btn-primary">保存</button>
                         <button type="button" class="btn btn-secondary" id="cancel-edit-outlook">取消</button>
                     </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal" id="codex-otp-provision-modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>⚙️ 初始化 Codex OTP</h3>
+                <button class="modal-close" id="close-codex-otp-provision-modal">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="codex-otp-provision-form">
+                    <div class="form-group">
+                        <label for="codex-otp-service-name">服务名称</label>
+                        <input type="text" id="codex-otp-service-name" name="service_name" required placeholder="例如：Codex OTP 主节点">
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="codex-otp-script-name">Worker Script 名称</label>
+                            <input type="text" id="codex-otp-script-name" name="script_name" required placeholder="codex-otp-main">
+                        </div>
+                        <div class="form-group">
+                            <label for="codex-otp-db-name">D1 名称</label>
+                            <input type="text" id="codex-otp-db-name" name="database_name" required placeholder="codex-otp-main-db">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="codex-otp-account-id">Cloudflare Account ID</label>
+                            <input type="text" id="codex-otp-account-id" name="account_id" required>
+                        </div>
+                        <div class="form-group">
+                            <label for="codex-otp-zone-id">Zone ID（可选）</label>
+                            <input type="text" id="codex-otp-zone-id" name="zone_id" placeholder="用于自动绑定 HTTP Route">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label for="codex-otp-api-token">Cloudflare API Token</label>
+                        <input type="password" id="codex-otp-api-token" name="api_token" required placeholder="仅用于初始化，不会回显">
+                        <small style="color: var(--text-muted);">需要具备 Workers Scripts、D1、Workers Routes 权限。该令牌不会写入服务配置。</small>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="codex-otp-route-pattern">HTTP Route</label>
+                            <input type="text" id="codex-otp-route-pattern" name="route_pattern" required placeholder="otp.example.com/*">
+                        </div>
+                        <div class="form-group">
+                            <label for="codex-otp-email-domain">邮箱域名</label>
+                            <input type="text" id="codex-otp-email-domain" name="email_domain" required placeholder="mail.example.com">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="codex-otp-admin-token">Admin Token（可选）</label>
+                            <input type="password" id="codex-otp-admin-token" name="admin_token" placeholder="留空则自动生成">
+                        </div>
+                        <div class="form-group">
+                            <label for="codex-otp-custom-auth">Custom Auth（可选）</label>
+                            <input type="password" id="codex-otp-custom-auth" name="custom_auth" placeholder="附加访问口令">
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="codex-otp-ttl-seconds">地址 TTL（秒）</label>
+                            <input type="number" id="codex-otp-ttl-seconds" name="ttl_seconds" min="300" max="86400" value="1800">
+                        </div>
+                        <div class="form-group">
+                            <label for="codex-otp-code-retention-days">验证码保留（天）</label>
+                            <input type="number" id="codex-otp-code-retention-days" name="code_retention_days" min="1" max="30" value="2">
+                        </div>
+                    </div>
+                    <div class="form-group">
+                        <label style="display:flex;align-items:center;gap:8px;cursor:pointer;">
+                            <input type="checkbox" id="codex-otp-allow-override" name="allow_override" value="true">
+                            <span>允许覆盖/复用已有资源</span>
+                        </label>
+                        <small style="color: var(--text-muted);">默认阻断同名 D1、Worker Script、Route。开启后会复用已有 D1，并允许更新同名 Worker。</small>
+                    </div>
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary" id="codex-otp-provision-submit">开始初始化</button>
+                        <button type="button" class="btn btn-secondary" id="cancel-codex-otp-provision">取消</button>
+                    </div>
+                    <div id="codex-otp-provision-result" style="display:none;margin-top:var(--spacing-md);"></div>
                 </form>
             </div>
         </div>

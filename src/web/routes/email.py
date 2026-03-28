@@ -14,6 +14,7 @@ from ...database.session import get_db
 from ...database.models import EmailService as EmailServiceModel
 from ...database.models import Account as AccountModel
 from ...config.settings import get_settings, update_settings
+from ...core.codex_otp_provisioner import CodexOtpProvisionError, provision_codex_otp_idempotent
 from ...services import EmailServiceFactory, EmailServiceType
 
 logger = logging.getLogger(__name__)
@@ -96,6 +97,8 @@ SENSITIVE_FIELDS = {
     'admin_token',
     'admin_password',
     'custom_auth',
+    'cf_api_token',
+    'admin_token',
 }
 
 def filter_sensitive_config(config: Dict[str, Any]) -> Dict[str, Any]:
@@ -114,6 +117,16 @@ def filter_sensitive_config(config: Dict[str, Any]) -> Dict[str, Any]:
     # 为 Outlook 计算是否有 OAuth
     if config.get('client_id') and config.get('refresh_token'):
         filtered['has_oauth'] = True
+
+    if isinstance(config.get('cloudflare'), dict):
+        cloudflare = dict(config['cloudflare'])
+        filtered['cloudflare'] = {
+            'database_id': cloudflare.get('database_id'),
+            'database_name': cloudflare.get('database_name'),
+            'worker_id': cloudflare.get('worker_id'),
+            'route': cloudflare.get('route'),
+            'script_name': cloudflare.get('script_name'),
+        }
 
     return filtered
 
@@ -187,6 +200,7 @@ async def get_email_services_stats():
             'freemail_count': 0,
             'imap_mail_count': 0,
             'cloudmail_count': 0,
+            'codex_otp_count': 0,
             'tempmail_available': tempmail_enabled or yyds_enabled,
             'yyds_mail_available': yyds_enabled,
             'enabled_count': enabled_count
@@ -209,6 +223,8 @@ async def get_email_services_stats():
                 stats['imap_mail_count'] = count
             elif service_type == 'cloudmail':
                 stats['cloudmail_count'] = count
+            elif service_type == 'codex_otp':
+                stats['codex_otp_count'] = count
 
         return stats
 
@@ -302,6 +318,19 @@ async def get_service_types():
                     {"name": "use_ssl", "label": "使用 SSL", "required": False, "default": True},
                     {"name": "email", "label": "邮箱地址", "required": True},
                     {"name": "password", "label": "密码/授权码", "required": True, "secret": True},
+                ]
+            },
+            {
+                "value": "codex_otp",
+                "label": "Codex OTP",
+                "description": "专用 OTP Worker 邮箱后端，可配合一键初始化使用",
+                "config_fields": [
+                    {"name": "base_url", "label": "Worker 地址", "required": True, "placeholder": "https://otp.example.com"},
+                    {"name": "admin_token", "label": "Admin Token", "required": True, "secret": True},
+                    {"name": "custom_auth", "label": "Custom Auth（可选）", "required": False, "secret": True},
+                    {"name": "domain", "label": "邮箱域名", "required": True, "placeholder": "mail.example.com"},
+                    {"name": "ttl_seconds", "label": "地址 TTL（秒）", "required": False, "default": 1800},
+                    {"name": "poll_interval", "label": "轮询间隔（秒）", "required": False, "default": 3},
                 ]
             }
         ]
@@ -653,6 +682,79 @@ class TempmailTestRequest(BaseModel):
     provider: str = "tempmail"
     api_url: Optional[str] = None
     api_key: Optional[str] = None
+
+
+class CodexOtpProvisionRequest(BaseModel):
+    service_name: str
+    script_name: str
+    database_name: str
+    route_pattern: str
+    email_domain: str
+    account_id: str
+    api_token: str
+    zone_id: str = ""
+    custom_auth: str = ""
+    admin_token: str = ""
+    ttl_seconds: int = 1800
+    code_retention_days: int = 2
+    location_hint: str = ""
+    enabled: bool = True
+    priority: int = 0
+    allow_override: bool = False
+
+    model_config = ConfigDict(str_strip_whitespace=True)
+
+
+@router.post("/codex-otp/provision")
+async def provision_codex_otp_service(request: CodexOtpProvisionRequest):
+    """一键初始化 Codex OTP Worker、D1 以及本地服务配置。"""
+    with get_db() as db:
+        existing = db.query(EmailServiceModel).filter(EmailServiceModel.name == request.service_name).first()
+        if existing:
+            raise HTTPException(status_code=400, detail="服务名称已存在")
+
+        try:
+            result = provision_codex_otp_idempotent(
+                account_id=request.account_id,
+                api_token=request.api_token,
+                zone_id=request.zone_id,
+                script_name=request.script_name,
+                database_name=request.database_name,
+                route_pattern=request.route_pattern,
+                email_domain=request.email_domain,
+                service_name=request.service_name,
+                custom_auth=request.custom_auth,
+                admin_token=request.admin_token,
+                ttl_seconds=request.ttl_seconds,
+                code_retention_days=request.code_retention_days,
+                location_hint=request.location_hint,
+                allow_override=request.allow_override,
+            )
+        except CodexOtpProvisionError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        config = {
+            **result.service_config,
+            "cloudflare": result.cloudflare,
+        }
+        service = EmailServiceModel(
+            service_type="codex_otp",
+            name=request.service_name,
+            config=config,
+            enabled=request.enabled,
+            priority=request.priority,
+        )
+        db.add(service)
+        db.commit()
+        db.refresh(service)
+
+        return {
+            "success": True,
+            "service": service_to_response(service),
+            "cloudflare": result.cloudflare,
+            "next_steps": result.next_steps,
+            "base_url": result.service_config.get("base_url") or None,
+        }
 
 
 @router.post("/test-tempmail")
