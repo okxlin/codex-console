@@ -4,6 +4,7 @@
 """
 
 import os
+import threading
 from typing import Optional, Dict, Any, Type, List
 from enum import Enum
 from pydantic import BaseModel, field_validator
@@ -319,6 +320,42 @@ SETTING_DEFINITIONS: Dict[str, SettingDefinition] = {
         default_value=0,
         category=SettingCategory.REGISTRATION,
         description="自动注册监控并回传的 CPA 服务 ID"
+    ),
+    "account_maintenance_enabled": SettingDefinition(
+        db_key="account.maintenance.enabled",
+        default_value=False,
+        category=SettingCategory.REGISTRATION,
+        description="是否启用账号自动验证与清理"
+    ),
+    "account_maintenance_schedule_time": SettingDefinition(
+        db_key="account.maintenance.schedule_time",
+        default_value="03:00",
+        category=SettingCategory.REGISTRATION,
+        description="账号自动验证与清理每日执行时间（HH:MM）"
+    ),
+    "account_maintenance_validation_proxy": SettingDefinition(
+        db_key="account.maintenance.validation_proxy",
+        default_value="",
+        category=SettingCategory.REGISTRATION,
+        description="账号自动验证使用的固定代理地址"
+    ),
+    "account_maintenance_cleanup_local": SettingDefinition(
+        db_key="account.maintenance.cleanup_local",
+        default_value=False,
+        category=SettingCategory.REGISTRATION,
+        description="验证失败后是否自动清理本地账号"
+    ),
+    "account_maintenance_cleanup_remote_cpa": SettingDefinition(
+        db_key="account.maintenance.cleanup_remote_cpa",
+        default_value=False,
+        category=SettingCategory.REGISTRATION,
+        description="验证失败后是否自动清理远端 CPA auth-files"
+    ),
+    "account_maintenance_cpa_service_id": SettingDefinition(
+        db_key="account.maintenance.cpa_service_id",
+        default_value=0,
+        category=SettingCategory.REGISTRATION,
+        description="账号自动清理远端 CPA 使用的服务 ID"
     ),
 
     # 邮箱服务配置
@@ -688,25 +725,21 @@ def _load_settings_from_db() -> Dict[str, Any]:
 
 def _save_settings_to_db(**kwargs) -> None:
     """保存设置到数据库"""
-    try:
-        from ..database.session import get_db
-        from ..database.crud import set_setting
+    from ..database.session import get_db
+    from ..database.crud import set_setting
 
-        with get_db() as db:
-            for attr_name, value in kwargs.items():
-                if attr_name in SETTING_DEFINITIONS:
-                    defn = SETTING_DEFINITIONS[attr_name]
-                    str_value = _value_to_string(value)
-                    set_setting(
-                        db,
-                        defn.db_key,
-                        str_value,
-                        category=defn.category.value,
-                        description=defn.description
-                    )
-    except Exception as e:
-        if "未初始化" not in str(e):
-            print(f"[Settings] 保存设置到数据库失败: {e}")
+    with get_db() as db:
+        for attr_name, value in kwargs.items():
+            if attr_name in SETTING_DEFINITIONS:
+                defn = SETTING_DEFINITIONS[attr_name]
+                str_value = _value_to_string(value)
+                set_setting(
+                    db,
+                    defn.db_key,
+                    str_value,
+                    category=defn.category.value,
+                    description=defn.description
+                )
 
 
 class Settings(BaseModel):
@@ -806,6 +839,12 @@ class Settings(BaseModel):
     registration_auto_concurrency: int = 1
     registration_auto_mode: str = "pipeline"
     registration_auto_cpa_service_id: int = 0
+    account_maintenance_enabled: bool = False
+    account_maintenance_schedule_time: str = "03:00"
+    account_maintenance_validation_proxy: str = ""
+    account_maintenance_cleanup_local: bool = False
+    account_maintenance_cleanup_remote_cpa: bool = False
+    account_maintenance_cpa_service_id: int = 0
 
     # 邮箱服务配置
     email_service_priority: Dict[str, int] = {"tempmail": 0, "yyds_mail": 1, "outlook": 2, "moe_mail": 3}
@@ -852,6 +891,7 @@ class Settings(BaseModel):
 
 # 全局配置实例
 _settings: Optional[Settings] = None
+_settings_lock = threading.RLock()
 
 
 def get_settings() -> Settings:
@@ -860,13 +900,12 @@ def get_settings() -> Settings:
     完全从数据库加载配置
     """
     global _settings
-    if _settings is None:
-        # 先初始化默认设置（如果数据库中没有的话）
-        init_default_settings()
-        # 从数据库加载所有设置
-        settings_dict = _load_settings_from_db()
-        _settings = Settings(**settings_dict)
-    return _settings
+    with _settings_lock:
+        if _settings is None:
+            init_default_settings()
+            settings_dict = _load_settings_from_db()
+            _settings = Settings(**settings_dict)
+        return _settings
 
 
 def update_settings(**kwargs) -> Settings:
@@ -874,18 +913,14 @@ def update_settings(**kwargs) -> Settings:
     更新配置并保存到数据库
     """
     global _settings
-    if _settings is None:
-        _settings = get_settings()
-
-    # 创建新的配置实例
-    updated_data = _settings.model_dump()
-    updated_data.update(kwargs)
-    _settings = Settings(**updated_data)
-
-    # 保存到数据库
-    _save_settings_to_db(**kwargs)
-
-    return _settings
+    with _settings_lock:
+        current = get_settings()
+        updated_data = current.model_dump()
+        updated_data.update(kwargs)
+        candidate = Settings(**updated_data)
+        _save_settings_to_db(**kwargs)
+        _settings = candidate
+        return _settings
 
 
 def get_database_url() -> str:

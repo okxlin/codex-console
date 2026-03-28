@@ -173,11 +173,13 @@ def _resolve_runtime_proxy(explicit_proxy: Optional[str], account: Optional[Acco
 
 
 def _serialize_bind_card_task(task: BindCardTask) -> dict:
-    account_email = task.account.email if task.account else None
+    account_email = task.account.email if task.account else (task.account_email_snapshot or None)
+    account_missing = task.account is None and bool(task.account_email_snapshot or task.account_label_snapshot)
     return {
         "id": task.id,
         "account_id": task.account_id,
         "account_email": account_email,
+        "account_missing": account_missing,
         "plan_type": task.plan_type,
         "workspace_name": task.workspace_name,
         "price_interval": task.price_interval,
@@ -2412,8 +2414,13 @@ def list_bind_card_tasks(
             query = query.filter(BindCardTask.status == status)
         if search:
             pattern = f"%{search}%"
-            query = query.join(Account, BindCardTask.account_id == Account.id).filter(
-                or_(Account.email.ilike(pattern), Account.account_id.ilike(pattern))
+            query = query.outerjoin(Account, BindCardTask.account_id == Account.id).filter(
+                or_(
+                    Account.email.ilike(pattern),
+                    Account.account_id.ilike(pattern),
+                    BindCardTask.account_email_snapshot.ilike(pattern),
+                    BindCardTask.account_label_snapshot.ilike(pattern),
+                )
             )
 
         total = query.count()
@@ -2454,6 +2461,8 @@ def open_bind_card_task(task_id: int):
             raise HTTPException(status_code=404, detail="绑卡任务不存在")
         if not task.checkout_url:
             raise HTTPException(status_code=400, detail="任务缺少 checkout 链接")
+        if task.account is None and str(task.status or "") == "account_removed":
+            raise HTTPException(status_code=400, detail="任务关联账号已被清理，仅保留历史记录")
 
         cookies_str = task.account.cookies if task.account else None
         logger.info("打开绑卡任务: task_id=%s account_id=%s", task.id, task.account_id)
@@ -2491,7 +2500,7 @@ def auto_bind_bind_card_task_third_party(task_id: int, request: ThirdPartyAutoBi
             raise HTTPException(status_code=404, detail="绑卡任务不存在")
         account = task.account
         if not account:
-            raise HTTPException(status_code=404, detail="任务关联账号不存在")
+            raise HTTPException(status_code=400, detail="任务关联账号已被清理，仅保留历史记录")
 
         checkout_session_id = str(task.checkout_session_id or "").strip() or _extract_checkout_session_id_from_url(task.checkout_url)
         publishable_key = str(task.publishable_key or "").strip()
@@ -2756,7 +2765,7 @@ def auto_bind_bind_card_task_local(task_id: int, request: LocalAutoBindRequest):
             raise HTTPException(status_code=404, detail="绑卡任务不存在")
         account = task.account
         if not account:
-            raise HTTPException(status_code=404, detail="任务关联账号不存在")
+            raise HTTPException(status_code=400, detail="任务关联账号已被清理，仅保留历史记录")
 
         checkout_session_id = str(task.checkout_session_id or "").strip() or _extract_checkout_session_id_from_url(task.checkout_url)
         checkout_url = (
@@ -2981,7 +2990,7 @@ def sync_bind_card_task_subscription(task_id: int, request: SyncBindCardTaskRequ
             raise HTTPException(status_code=404, detail="绑卡任务不存在")
         account = task.account
         if not account:
-            raise HTTPException(status_code=404, detail="任务关联账号不存在")
+            raise HTTPException(status_code=400, detail="任务关联账号已被清理，仅保留历史记录")
 
         proxy = _resolve_runtime_proxy(request.proxy, account)
         now = utcnow_naive()
@@ -3083,7 +3092,7 @@ def mark_bind_card_task_user_action(task_id: int, request: MarkUserActionRequest
             raise HTTPException(status_code=404, detail="绑卡任务不存在")
         account = task.account
         if not account:
-            raise HTTPException(status_code=404, detail="任务关联账号不存在")
+            raise HTTPException(status_code=400, detail="任务关联账号已被清理，仅保留历史记录")
 
         proxy = _resolve_runtime_proxy(request.proxy, account)
         timeout_seconds = int(request.timeout_seconds)

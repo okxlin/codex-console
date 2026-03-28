@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ....database import crud
 from ....database.session import get_db
+from ....config.settings import get_settings
 from ....core.upload.cpa_upload import test_cpa_connection
 
 router = APIRouter()
@@ -50,6 +51,7 @@ class CpaServiceResponse(BaseModel):
 class CpaServiceTestRequest(BaseModel):
     api_url: Optional[str] = None
     api_token: Optional[str] = None
+    proxy_url: Optional[str] = None
 
 
 def _to_response(svc) -> CpaServiceResponse:
@@ -139,6 +141,22 @@ async def update_cpa_service(service_id: int, request: CpaServiceUpdate):
         if request.proxy_url is not None:
             update_data["proxy_url"] = request.proxy_url
         if request.enabled is not None:
+            settings = get_settings()
+            used_by_auto_registration = int(settings.registration_auto_cpa_service_id or 0) == service_id
+            used_by_maintenance = (
+                bool(settings.account_maintenance_cleanup_remote_cpa)
+                and int(settings.account_maintenance_cpa_service_id or 0) == service_id
+            )
+            if request.enabled is False and (used_by_auto_registration or used_by_maintenance):
+                reasons = []
+                if used_by_auto_registration:
+                    reasons.append("自动注册库存监控")
+                if used_by_maintenance:
+                    reasons.append("账号自动维护远程清理")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"CPA 服务正在被{ '、'.join(reasons) }使用，请先在设置中解绑后再禁用",
+                )
             update_data["enabled"] = request.enabled
         if request.priority is not None:
             update_data["priority"] = request.priority
@@ -154,6 +172,24 @@ async def delete_cpa_service(service_id: int):
         service = crud.get_cpa_service_by_id(db, service_id)
         if not service:
             raise HTTPException(status_code=404, detail="CPA 服务不存在")
+
+        settings = get_settings()
+        used_by_auto_registration = int(settings.registration_auto_cpa_service_id or 0) == service_id
+        used_by_maintenance = (
+            bool(settings.account_maintenance_cleanup_remote_cpa)
+            and int(settings.account_maintenance_cpa_service_id or 0) == service_id
+        )
+        if used_by_auto_registration or used_by_maintenance:
+            reasons = []
+            if used_by_auto_registration:
+                reasons.append("自动注册库存监控")
+            if used_by_maintenance:
+                reasons.append("账号自动维护远程清理")
+            raise HTTPException(
+                status_code=400,
+                detail=f"CPA 服务正在被{ '、'.join(reasons) }使用，请先在设置中解绑后再删除",
+            )
+
         crud.delete_cpa_service(db, service_id)
         return {"success": True, "message": f"CPA 服务 {service.name} 已删除"}
 
@@ -165,7 +201,7 @@ async def test_cpa_service(service_id: int):
         service = crud.get_cpa_service_by_id(db, service_id)
         if not service:
             raise HTTPException(status_code=404, detail="CPA 服务不存在")
-        success, message = test_cpa_connection(service.api_url, service.api_token)
+        success, message = test_cpa_connection(service.api_url, service.api_token, getattr(service, "proxy_url", None))
         return {"success": success, "message": message}
 
 
@@ -174,5 +210,5 @@ async def test_cpa_connection_direct(request: CpaServiceTestRequest):
     """直接测试 CPA 连接（用于添加前验证）"""
     if not request.api_url or not request.api_token:
         raise HTTPException(status_code=400, detail="api_url 和 api_token 不能为空")
-    success, message = test_cpa_connection(request.api_url, request.api_token)
+    success, message = test_cpa_connection(request.api_url, request.api_token, request.proxy_url)
     return {"success": success, "message": message}

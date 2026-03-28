@@ -4,11 +4,21 @@
 
 from typing import List, Optional, Dict, Any, Union
 from datetime import datetime, timedelta
+from pathlib import Path
 from sqlalchemy.orm import Session
 from sqlalchemy import and_, or_, desc, asc, func
 
-from .models import Account, EmailService, RegistrationTask, Setting, Proxy, CpaService, Sub2ApiService
+from .models import Account, EmailService, RegistrationTask, Setting, Proxy, CpaService, Sub2ApiService, BindCardTask
 from ..core.timezone_utils import utcnow_naive
+
+
+def _remove_current_account_snapshot_file() -> None:
+    try:
+        snapshot_path = Path("data") / "current_codex_account.json"
+        if snapshot_path.exists():
+            snapshot_path.unlink()
+    except Exception:
+        pass
 
 
 # ============================================================================
@@ -120,12 +130,35 @@ def update_account(
     return db_account
 
 
+def mark_bind_card_tasks_account_removed(db: Session, account_id: int) -> int:
+    """解绑绑卡任务与账号，保留历史记录。"""
+    tasks = db.query(BindCardTask).filter(BindCardTask.account_id == account_id).all()
+    for task in tasks:
+        account = get_account_by_id(db, account_id)
+        if account:
+            task.account_email_snapshot = account.email
+            task.account_label_snapshot = account.email or str(account.account_id or "")
+        detail = str(task.last_error or "").strip()
+        prefix = "关联账号已被自动清理"
+        task.last_error = f"{prefix}; {detail}" if detail and prefix not in detail else (detail or prefix)
+        if str(task.status or "") not in {"completed", "failed", "account_removed"}:
+            task.status = "account_removed"
+        task.account_id = None
+    db.flush()
+    return len(tasks)
+
+
 def delete_account(db: Session, account_id: int) -> bool:
     """删除账户"""
     db_account = get_account_by_id(db, account_id)
     if not db_account:
         return False
 
+    current_setting = get_setting(db, "codex.current_account_id")
+    if current_setting and str(current_setting.value or "").strip() == str(account_id):
+        current_setting.value = ""
+        _remove_current_account_snapshot_file()
+    mark_bind_card_tasks_account_removed(db, account_id)
     db.delete(db_account)
     db.commit()
     return True
@@ -133,6 +166,14 @@ def delete_account(db: Session, account_id: int) -> bool:
 
 def delete_accounts_batch(db: Session, account_ids: List[int]) -> int:
     """批量删除账户"""
+    if not account_ids:
+        return 0
+    current_setting = get_setting(db, "codex.current_account_id")
+    if current_setting and str(current_setting.value or "").strip() in {str(account_id) for account_id in account_ids}:
+        current_setting.value = ""
+        _remove_current_account_snapshot_file()
+    for account_id in account_ids:
+        mark_bind_card_tasks_account_removed(db, account_id)
     result = db.query(Account).filter(Account.id.in_(account_ids)).delete(synchronize_session=False)
     db.commit()
     return result

@@ -1725,9 +1725,9 @@ async function loadBindCardTasks(silent = false) {
                 <td>${format.date(task.created_at)}</td>
                 <td>
                     <div class="bind-task-actions">
-                        <button class="btn btn-primary bind-task-action-btn" onclick="openBindCardTask(${task.id})">打开</button>
-                        <button class="btn btn-primary bind-task-action-btn" onclick="markBindCardTaskUserAction(${task.id})">我已完成支付</button>
-                        <button class="btn btn-secondary bind-task-action-btn" onclick="syncBindCardTask(${task.id})">同步订阅</button>
+                        <button class="btn btn-primary bind-task-action-btn" onclick="openBindCardTask(${task.id})" ${task.account_missing ? 'disabled title="关联账号已被清理"' : ''}>打开</button>
+                        <button class="btn btn-primary bind-task-action-btn" onclick="markBindCardTaskUserAction(${task.id})" ${task.account_missing ? 'disabled title="关联账号已被清理"' : ''}>我已完成支付</button>
+                        <button class="btn btn-secondary bind-task-action-btn" onclick="syncBindCardTask(${task.id})" ${task.account_missing ? 'disabled title="关联账号已被清理"' : ''}>同步订阅</button>
                         <button class="btn btn-danger bind-task-action-btn" onclick="deleteBindCardTask(${task.id})">删除</button>
                     </div>
                     ${task.last_error ? `<div class="hint" style="margin-top:6px;color:var(--danger-color);" title="${escapeHtml(task.last_error)}">${escapeHtml(task.last_error)}</div>` : ""}

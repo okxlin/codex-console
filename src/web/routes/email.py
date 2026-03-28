@@ -13,7 +13,7 @@ from ...database import crud
 from ...database.session import get_db
 from ...database.models import EmailService as EmailServiceModel
 from ...database.models import Account as AccountModel
-from ...config.settings import get_settings
+from ...config.settings import get_settings, update_settings
 from ...services import EmailServiceFactory, EmailServiceType
 
 logger = logging.getLogger(__name__)
@@ -431,6 +431,10 @@ async def delete_email_service(service_id: int):
         if not service:
             raise HTTPException(status_code=404, detail="服务不存在")
 
+        settings = get_settings()
+        if int(settings.registration_auto_email_service_id or 0) == service_id:
+            update_settings(registration_auto_email_service_id=0)
+
         db.delete(service)
         db.commit()
 
@@ -620,6 +624,9 @@ async def batch_import_outlook(request: OutlookBatchImportRequest):
 async def batch_delete_outlook(service_ids: List[int]):
     """批量删除 Outlook 邮箱服务"""
     deleted = 0
+    settings = get_settings()
+    auto_service_id = int(settings.registration_auto_email_service_id or 0)
+    cleared_auto_binding = False
     with get_db() as db:
         for service_id in service_ids:
             service = db.query(EmailServiceModel).filter(
@@ -627,9 +634,14 @@ async def batch_delete_outlook(service_ids: List[int]):
                 EmailServiceModel.service_type == "outlook"
             ).first()
             if service:
+                if service.id == auto_service_id:
+                    cleared_auto_binding = True
                 db.delete(service)
                 deleted += 1
         db.commit()
+
+    if cleared_auto_binding:
+        update_settings(registration_auto_email_service_id=0)
 
     return {"success": True, "deleted": deleted, "message": f"已删除 {deleted} 个服务"}
 

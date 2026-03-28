@@ -5,6 +5,7 @@ import io
 import asyncio
 import json
 import logging
+import os
 import re
 import zipfile
 import base64
@@ -412,6 +413,31 @@ def _set_current_account_id(db, account_id: int):
         description="当前切换中的 Codex 账号 ID",
         category="accounts",
     )
+
+
+def _clear_current_account_id(db) -> None:
+    setting = crud.get_setting(db, CURRENT_ACCOUNT_SETTING_KEY)
+    if setting:
+        setting.value = ""
+        db.commit()
+
+
+def _remove_current_account_snapshot() -> None:
+    try:
+        snapshot_path = Path("data") / "current_codex_account.json"
+        if snapshot_path.exists():
+            snapshot_path.unlink()
+    except Exception as exc:
+        logger.warning(f"删除 current_codex_account.json 失败: {exc}")
+
+
+def clear_current_account_selection_if_matches(db, account_id: int) -> bool:
+    current_id = _get_current_account_id(db)
+    if current_id != account_id:
+        return False
+    _clear_current_account_id(db)
+    _remove_current_account_snapshot()
+    return True
 
 
 def _is_overview_card_removed(account: Account) -> bool:
@@ -1408,6 +1434,7 @@ async def delete_account(account_id: int):
         if not account:
             raise HTTPException(status_code=404, detail="账号不存在")
 
+        clear_current_account_selection_if_matches(db, account_id)
         crud.delete_account(db, account_id)
         return {"success": True, "message": f"账号 {account.email} 已删除"}
 
@@ -1427,6 +1454,7 @@ async def batch_delete_accounts(request: BatchDeleteRequest):
             try:
                 account = crud.get_account_by_id(db, account_id)
                 if account:
+                    clear_current_account_selection_if_matches(db, account_id)
                     crud.delete_account(db, account_id)
                     deleted_count += 1
             except Exception as e:

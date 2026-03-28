@@ -96,6 +96,7 @@ def get_auto_registration_inventory(
     success, payload, message = list_cpa_auth_files(
         str(cpa_service.api_url),
         str(cpa_service.api_token),
+        proxy_url=str(getattr(cpa_service, "proxy_url", "") or "").strip() or None,
     )
     if not success:
         logger.warning("自动注册读取 auth-files 库存失败: %s", message)

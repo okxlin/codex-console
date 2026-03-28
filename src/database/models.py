@@ -128,7 +128,7 @@ class BindCardTask(Base):
     __tablename__ = "bind_card_tasks"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=False, index=True)
+    account_id = Column(Integer, ForeignKey("accounts.id"), nullable=True, index=True)
     plan_type = Column(String(20), nullable=False)  # plus / team
     workspace_name = Column(String(255))
     price_interval = Column(String(20))
@@ -143,6 +143,8 @@ class BindCardTask(Base):
     bind_mode = Column(String(30), default="semi_auto")  # semi_auto / third_party / local_auto
     status = Column(String(20), default="link_ready")  # link_ready / opened / waiting_user_action / verifying / completed / failed
     last_error = Column(Text)
+    account_email_snapshot = Column(String(255))
+    account_label_snapshot = Column(String(255))
     opened_at = Column(DateTime)
     last_checked_at = Column(DateTime)
     completed_at = Column(DateTime)

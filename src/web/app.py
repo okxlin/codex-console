@@ -27,6 +27,7 @@ from .task_manager import task_manager
 
 logger = logging.getLogger(__name__)
 auto_registration_coordinator = None
+account_maintenance_coordinator = None
 
 # 获取项目根目录
 # PyInstaller 打包后静态资源在 sys._MEIPASS，开发时在源码根目录
@@ -62,6 +63,10 @@ def create_app() -> FastAPI:
             AutoRegistrationCoordinator,
             register_auto_registration_coordinator,
         )
+        from ..core.account_maintenance import (
+            AccountMaintenanceCoordinator,
+            register_account_maintenance_coordinator,
+        )
         from .routes.registration import run_auto_registration_batch
 
         try:
@@ -72,12 +77,16 @@ def create_app() -> FastAPI:
         loop = asyncio.get_running_loop()
         task_manager.set_loop(loop)
 
-        global auto_registration_coordinator
+        global auto_registration_coordinator, account_maintenance_coordinator
         auto_registration_coordinator = AutoRegistrationCoordinator(
             trigger_callback=run_auto_registration_batch,
         )
         register_auto_registration_coordinator(auto_registration_coordinator)
         auto_registration_coordinator.start()
+
+        account_maintenance_coordinator = AccountMaintenanceCoordinator()
+        register_account_maintenance_coordinator(account_maintenance_coordinator)
+        account_maintenance_coordinator.start()
 
         async def run_log_cleanup_once():
             try:
@@ -116,6 +125,11 @@ def create_app() -> FastAPI:
                 await auto_registration_coordinator.stop()
                 register_auto_registration_coordinator(None)
                 auto_registration_coordinator = None
+
+            if account_maintenance_coordinator is not None:
+                await account_maintenance_coordinator.stop()
+                register_account_maintenance_coordinator(None)
+                account_maintenance_coordinator = None
 
             cleanup_task = getattr(app.state, "log_cleanup_task", None)
             if cleanup_task:
