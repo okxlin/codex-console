@@ -59,9 +59,9 @@ def setup_application():
     # 加载 .env 文件（优先级低于已有环境变量）
     _load_dotenv()
 
-    # 确保数据目录和日志目录在可执行文件所在目录（打包后也适用）
-    data_dir = project_root / "data"
-    logs_dir = project_root / "logs"
+    # 允许外部运行时目录覆盖，避免测试实例污染源码目录
+    data_dir = Path(os.environ.get("APP_DATA_DIR") or (project_root / "data"))
+    logs_dir = Path(os.environ.get("APP_LOGS_DIR") or (project_root / "logs"))
     data_dir.mkdir(exist_ok=True)
     logs_dir.mkdir(exist_ok=True)
 

@@ -185,6 +185,41 @@ def test_delete_cpa_auth_file_fails_when_remote_name_missing(monkeypatch):
     assert "未在远端 auth-files 中匹配到" in message
 
 
+def test_delete_cpa_auth_file_retries_path_style_when_query_delete_returns_404(monkeypatch):
+    monkeypatch.setattr(
+        cpa_upload,
+        "list_cpa_auth_files",
+        lambda api_url, api_token, proxy_url=None: (
+            True,
+            {"files": [{"name": "tester@example.com.json"}]},
+            "ok",
+        ),
+    )
+
+    calls = []
+    responses = [
+        FakeResponse(status_code=404, text="not found"),
+        FakeResponse(status_code=204),
+    ]
+
+    def fake_delete(url, **kwargs):
+        calls.append({"url": url, "kwargs": kwargs})
+        return responses.pop(0)
+
+    monkeypatch.setattr(cpa_upload.cffi_requests, "delete", fake_delete)
+
+    success, message = cpa_upload.delete_cpa_auth_file(
+        "https://cpa.example.com",
+        "token-123",
+        "tester@example.com",
+    )
+
+    assert success is True
+    assert "tester@example.com.json" in message
+    assert calls[0]["url"] == "https://cpa.example.com/v0/management/auth-files?name=tester%40example.com.json"
+    assert calls[1]["url"] == "https://cpa.example.com/v0/management/auth-files/tester%40example.com.json"
+
+
 def test_match_auth_file_name_requires_exact_email_json_match():
     payload = {
         "files": [
@@ -195,3 +230,46 @@ def test_match_auth_file_name_requires_exact_email_json_match():
     }
 
     assert cpa_upload._match_auth_file_name(payload, "tester@example.com") == "tester@example.com.json"
+
+
+def test_probe_cpaproxyapi_compatibility_collects_delete_strategies(monkeypatch):
+    monkeypatch.setattr(
+        cpa_upload,
+        "list_cpa_auth_files",
+        lambda api_url, api_token, proxy_url=None: (
+            True,
+            {"files": [{"filename": "tester@example.com.json"}]},
+            "ok",
+        ),
+    )
+
+    responses = [
+        FakeResponse(status_code=404, text="missing"),
+        FakeResponse(status_code=204),
+        FakeResponse(status_code=404, text="missing"),
+        FakeResponse(status_code=404, text="missing"),
+    ]
+    calls = []
+
+    def fake_delete(url, **kwargs):
+        calls.append(url)
+        return responses.pop(0)
+
+    monkeypatch.setattr(cpa_upload.cffi_requests, "delete", fake_delete)
+
+    result = cpa_upload.probe_cpaproxyapi_compatibility(
+        "https://cpa.example.com",
+        "token-123",
+        email="tester@example.com",
+    )
+
+    assert result["list_probe"]["ok"] is True
+    assert result["list_probe"]["name_fields_seen"] == ["filename"]
+    assert result["delete_probe"]["filename"] == "tester@example.com.json"
+    assert result["delete_probe"]["recommended_strategy"] == "path_segment"
+    assert result["delete_probe"]["strategies"][0]["strategy"] == "query_name"
+    assert result["delete_probe"]["strategies"][0]["status_code"] == 404
+    assert result["delete_probe"]["strategies"][1]["strategy"] == "path_segment"
+    assert result["delete_probe"]["strategies"][1]["ok"] is True
+    assert calls[0] == "https://cpa.example.com/v0/management/auth-files?name=tester%40example.com.json"
+    assert calls[1] == "https://cpa.example.com/v0/management/auth-files/tester%40example.com.json"

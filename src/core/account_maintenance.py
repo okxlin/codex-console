@@ -17,15 +17,21 @@ from ..database.models import Account
 from ..database.crud import set_setting
 from ..database.session import get_db
 from ..core.current_account import clear_current_account_selection_if_matches
+from ..core.timezone_utils import utcnow_naive
 
 logger = logging.getLogger(__name__)
 ACCOUNT_MAINTENANCE_CHANNEL = "account-maintenance"
 _ACCOUNT_MAINTENANCE_STATE_KEY = "account.maintenance.last_state"
+_ACCOUNT_MAINTENANCE_RUNTIME_KEYS = {
+    "status",
+    "message",
+    "last_run_at",
+    "next_run_at",
+    "last_summary",
+}
 _account_maintenance_state = {
-    "enabled": False,
     "status": "idle",
     "message": "账号自动维护未启动",
-    "schedule_time": None,
     "last_run_at": None,
     "next_run_at": None,
     "last_summary": None,
@@ -34,6 +40,7 @@ _coordinator_instance = None
 _MAINTENANCE_LOGS_SETTING_KEY = "account.maintenance.last_logs"
 _MAX_PERSISTED_LOG_LINES = 200
 _maintenance_persist_lock = threading.RLock()
+_MAINTENANCE_STATUS_PUBLISH_EVERY = 50
 
 
 def _timestamp() -> str:
@@ -41,7 +48,8 @@ def _timestamp() -> str:
 
 
 def update_account_maintenance_state(**kwargs) -> dict:
-    _account_maintenance_state.update(kwargs)
+    runtime_updates = {key: value for key, value in kwargs.items() if key in _ACCOUNT_MAINTENANCE_RUNTIME_KEYS}
+    _account_maintenance_state.update(runtime_updates)
     state = get_account_maintenance_state()
     _persist_account_maintenance_state(state)
     return state
@@ -53,7 +61,7 @@ def get_account_maintenance_state() -> dict:
         return state
     persisted = get_persisted_account_maintenance_state()
     if persisted:
-        state.update({k: v for k, v in persisted.items() if v is not None})
+        state.update({k: v for k, v in persisted.items() if k in _ACCOUNT_MAINTENANCE_RUNTIME_KEYS and v is not None})
     return state
 
 
@@ -142,6 +150,28 @@ def _publish_account_maintenance_status(**kwargs) -> None:
     task_manager.update_batch_status(ACCOUNT_MAINTENANCE_CHANNEL, **kwargs)
 
 
+def _maybe_publish_account_maintenance_progress(
+    *,
+    force: bool = False,
+    current_index: int,
+    completed: int,
+    success: int,
+    failed: int,
+    skipped: int,
+    total: int,
+) -> None:
+    if not force and current_index % _MAINTENANCE_STATUS_PUBLISH_EVERY != 0:
+        return
+    _publish_account_maintenance_status(
+        current_index=current_index,
+        completed=completed,
+        success=success,
+        failed=failed,
+        skipped=skipped,
+        total=total,
+    )
+
+
 def get_persisted_account_maintenance_logs() -> list[str]:
     try:
         with get_db() as db:
@@ -168,14 +198,96 @@ def _parse_schedule_time(value: str) -> tuple[int, int]:
     return hour, minute
 
 
-def compute_next_run_at(schedule_time: str, now: Optional[datetime] = None) -> datetime:
+def _expand_cron_field(field: str, min_value: int, max_value: int) -> set[int]:
+    text = str(field or "*").strip()
+    values: set[int] = set()
+    for part in text.split(","):
+        item = part.strip()
+        if not item:
+            raise ValueError("Cron 表达式存在空字段")
+        if "/" in item:
+            base, step_text = item.split("/", 1)
+            try:
+                step = int(step_text)
+            except Exception as exc:
+                raise ValueError("Cron 步长必须为整数") from exc
+            if step <= 0:
+                raise ValueError("Cron 步长必须大于 0")
+            if base in ("", "*"):
+                start, end = min_value, max_value
+            elif "-" in base:
+                start_text, end_text = base.split("-", 1)
+                start, end = int(start_text), int(end_text)
+            else:
+                start = int(base)
+                end = max_value
+            values.update(v for v in range(start, end + 1) if min_value <= v <= max_value and (v - start) % step == 0)
+            continue
+        if item == "*":
+            values.update(range(min_value, max_value + 1))
+            continue
+        if "-" in item:
+            start_text, end_text = item.split("-", 1)
+            start, end = int(start_text), int(end_text)
+            if start > end:
+                raise ValueError("Cron 范围必须从小到大")
+            values.update(v for v in range(start, end + 1) if min_value <= v <= max_value)
+            continue
+        value = int(item)
+        if not (min_value <= value <= max_value):
+            raise ValueError("Cron 字段超出范围")
+        values.add(value)
+    if not values:
+        raise ValueError("Cron 字段不能为空")
+    return values
+
+
+def _matches_cron_day(dt_local: datetime, day_values: set[int], month_values: set[int], weekday_values: set[int]) -> bool:
+    cron_weekday = (dt_local.weekday() + 1) % 7
+    return dt_local.day in day_values and dt_local.month in month_values and cron_weekday in weekday_values
+
+
+def _parse_schedule_cron(expr: str) -> tuple[set[int], set[int], set[int], set[int], set[int]]:
+    parts = [part.strip() for part in str(expr or "").split() if part.strip()]
+    if len(parts) != 5:
+        raise ValueError("Cron 表达式必须为 5 段基础格式：分 时 日 月 周")
+    minute_values = _expand_cron_field(parts[0], 0, 59)
+    hour_values = _expand_cron_field(parts[1], 0, 23)
+    day_values = _expand_cron_field(parts[2], 1, 31)
+    month_values = _expand_cron_field(parts[3], 1, 12)
+    weekday_values = _expand_cron_field(parts[4], 0, 6)
+    return minute_values, hour_values, day_values, month_values, weekday_values
+
+
+def compute_next_run_at(
+    schedule_time: str,
+    now: Optional[datetime] = None,
+    schedule_mode: str = "daily",
+    schedule_cron: Optional[str] = None,
+) -> datetime:
     current = now or datetime.now(timezone.utc)
-    hour, minute = _parse_schedule_time(schedule_time)
     local_now = current.astimezone(timezone(timedelta(hours=8)))
-    target_local = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if target_local <= local_now:
-        target_local += timedelta(days=1)
-    return target_local.astimezone(timezone.utc)
+    mode = str(schedule_mode or "daily").strip().lower()
+    if mode == "daily":
+        hour, minute = _parse_schedule_time(schedule_time)
+        target_local = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target_local <= local_now:
+            target_local += timedelta(days=1)
+        return target_local.astimezone(timezone.utc)
+    if mode != "cron":
+        raise ValueError("自动维护调度模式只支持 daily 或 cron")
+
+    minute_values, hour_values, day_values, month_values, weekday_values = _parse_schedule_cron(schedule_cron or "")
+    candidate = local_now.replace(second=0, microsecond=0) + timedelta(minutes=1)
+    for _ in range(366 * 24 * 60):
+        if (
+            candidate.minute in minute_values
+            and candidate.hour in hour_values
+            and _matches_cron_day(candidate, day_values, month_values, weekday_values)
+        ):
+            return candidate.astimezone(timezone.utc)
+        candidate += timedelta(minutes=1)
+    raise ValueError("Cron 表达式在未来一年内没有可执行时间，请检查是否为受支持的 5 段基础格式")
 
 
 @dataclass
@@ -183,6 +295,7 @@ class AccountMaintenanceResult:
     total_accounts: int
     valid_count: int
     invalid_count: int
+    skipped_count: int
     local_deleted_count: int
     remote_deleted_count: int
     errors: list[str]
@@ -235,6 +348,9 @@ def _current_maintenance_settings() -> dict:
         remote_proxy = _resolve_remote_proxy(settings, cpa_service_id)
     return {
         "validation_proxy": str(settings.account_maintenance_validation_proxy or "").strip() or None,
+        "validation_interval_minutes": max(0, int(settings.account_maintenance_validation_interval_minutes or 0)),
+        "schedule_mode": str(getattr(settings, "account_maintenance_schedule_mode", "daily") or "daily").strip().lower(),
+        "schedule_cron": str(getattr(settings, "account_maintenance_schedule_cron", "0 3 * * *") or "0 3 * * *").strip(),
         "cleanup_local": bool(settings.account_maintenance_cleanup_local),
         "cleanup_remote": bool(settings.account_maintenance_cleanup_remote_cpa),
         "cpa_service_id": cpa_service_id,
@@ -253,6 +369,17 @@ def _catchup_due_run(settings: Settings, now: Optional[datetime] = None) -> bool
     except Exception:
         last_run_at = None
 
+    mode = str(getattr(settings, "account_maintenance_schedule_mode", "daily") or "daily").strip().lower()
+    if mode == "cron":
+        cron_text = str(getattr(settings, "account_maintenance_schedule_cron", "0 3 * * *") or "0 3 * * *")
+        next_after_last = compute_next_run_at(
+            str(getattr(settings, "account_maintenance_schedule_time", "03:00") or "03:00"),
+            now=last_run_at if last_run_at is not None else current - timedelta(days=1),
+            schedule_mode="cron",
+            schedule_cron=cron_text,
+        )
+        return next_after_last <= current
+
     hour, minute = _parse_schedule_time(str(settings.account_maintenance_schedule_time or "03:00"))
     local_now = current.astimezone(timezone(timedelta(hours=8)))
     today_due_local = local_now.replace(hour=hour, minute=minute, second=0, microsecond=0)
@@ -266,6 +393,20 @@ def _catchup_due_run(settings: Settings, now: Optional[datetime] = None) -> bool
 def _reload_account_for_action(account_id: int):
     with get_db() as db:
         return crud.get_account_by_id(db, account_id)
+
+
+def _should_skip_validation(account: Account, interval_minutes: int) -> bool:
+    if interval_minutes <= 0:
+        return False
+    last_checked_at = getattr(account, "last_maintenance_checked_at", None)
+    if not last_checked_at:
+        return False
+    return last_checked_at + timedelta(minutes=interval_minutes) > utcnow_naive()
+
+
+def _mark_account_maintenance_checked(account_id: int) -> None:
+    with get_db() as db:
+        crud.update_account(db, account_id, last_maintenance_checked_at=utcnow_naive())
 
 
 def _is_account_maintenance_cancelled() -> bool:
@@ -285,9 +426,16 @@ def run_account_maintenance_once(settings: Settings) -> AccountMaintenanceResult
     total_accounts = 0
     valid_count = 0
     invalid_count = 0
+    skipped_count = 0
     local_deleted_count = 0
     remote_deleted_count = 0
     errors: list[str] = []
+    validation_exception_count = 0
+    validation_failed_log_sample_count = 0
+    remote_cleanup_failed_count = 0
+    local_cleanup_failed_count = 0
+    local_deleted_log_sample_count = 0
+    status_updated_count = 0
 
     for account in _iter_all_accounts():
         total_accounts += 1
@@ -302,44 +450,66 @@ def run_account_maintenance_once(settings: Settings) -> AccountMaintenanceResult
         if latest_account is None:
             errors.append(f"账号已不存在 account_id={account.id}: 跳过本轮维护")
             add_account_maintenance_log(f"[账号维护] 账号已不存在，跳过: account_id={account.id}")
-            _publish_account_maintenance_status(
+            _maybe_publish_account_maintenance_progress(
+                force=True,
                 current_index=total_accounts,
                 completed=total_accounts,
                 success=valid_count,
                 failed=invalid_count,
+                skipped=skipped_count,
                 total=total_accounts,
             )
             continue
         account = latest_account
         account_label = str(account.email or f"account_id={account.id}")
-        try:
-            is_valid, error = do_validate(account.id, current_snapshot["validation_proxy"])
-        except Exception as exc:
-            errors.append(f"验证异常 {account_label}: {exc}")
-            add_account_maintenance_log(f"[账号维护] 验证异常: {account_label} -> {exc}")
-            _publish_account_maintenance_status(
+        validation_interval_minutes = int(current_snapshot.get("validation_interval_minutes") or 0)
+        if _should_skip_validation(account, validation_interval_minutes):
+            skipped_count += 1
+            _maybe_publish_account_maintenance_progress(
                 current_index=total_accounts,
                 completed=total_accounts,
                 success=valid_count,
                 failed=invalid_count,
+                skipped=skipped_count,
+                total=total_accounts,
+            )
+            continue
+        try:
+            is_valid, error = do_validate(account.id, current_snapshot["validation_proxy"])
+            _mark_account_maintenance_checked(account.id)
+        except Exception as exc:
+            validation_exception_count += 1
+            _mark_account_maintenance_checked(account.id)
+            errors.append(f"验证异常 {account_label}: {exc}")
+            if validation_exception_count <= 5:
+                add_account_maintenance_log(f"[账号维护] 验证异常: {account_label} -> {exc}")
+            _maybe_publish_account_maintenance_progress(
+                current_index=total_accounts,
+                completed=total_accounts,
+                success=valid_count,
+                failed=invalid_count,
+                skipped=skipped_count,
                 total=total_accounts,
             )
             continue
         if is_valid:
             valid_count += 1
-            _publish_account_maintenance_status(
+            _maybe_publish_account_maintenance_progress(
                 current_index=total_accounts,
                 completed=total_accounts,
                 success=valid_count,
                 failed=invalid_count,
+                skipped=skipped_count,
                 total=total_accounts,
             )
             continue
 
         invalid_count += 1
-        add_account_maintenance_log(
-            f"[账号维护] 验证失败: {account_label} -> {error or '未知错误'}"
-        )
+        validation_failed_log_sample_count += 1
+        if validation_failed_log_sample_count <= 10:
+            add_account_maintenance_log(
+                f"[账号维护] 验证失败: {account_label} -> {error or '未知错误'}"
+            )
 
         remote_cleanup_ok = True
         cleanup_remote = current_snapshot["cleanup_remote"]
@@ -354,16 +524,19 @@ def run_account_maintenance_once(settings: Settings) -> AccountMaintenanceResult
 
         if cleanup_remote and not remote_service:
             remote_cleanup_ok = False
+            remote_cleanup_failed_count += 1
             errors.append(f"远端清理失败 {account_label}: CPA 服务 {cpa_service_id} 不存在、已禁用或已被删除")
 
         if cleanup_remote and remote_service and not account.email:
             remote_cleanup_ok = False
+            remote_cleanup_failed_count += 1
             errors.append(f"远端清理失败 account_id={account.id}: 缺少邮箱，无法精确删除远端 CPA auth-file")
 
         if cleanup_remote and remote_service and account.email:
             latest_account = _reload_account_for_action(account.id)
             if latest_account is None:
                 remote_cleanup_ok = False
+                remote_cleanup_failed_count += 1
                 errors.append(f"远端清理前账号已不存在 account_id={account.id}: 跳过远端删除")
             else:
                 account = latest_account
@@ -383,13 +556,14 @@ def run_account_maintenance_once(settings: Settings) -> AccountMaintenanceResult
                     add_account_maintenance_log(f"[账号维护] 已清理远端 CPA: {account.email} ({message})")
                 else:
                     remote_cleanup_ok = False
+                    remote_cleanup_failed_count += 1
                     errors.append(f"远端清理失败 {account_label}: {message}")
 
         if cleanup_remote and cleanup_local and not remote_cleanup_ok:
-            add_account_maintenance_log(
-                f"[账号维护] 跳过本地删除: {account_label}，原因是远端 CPA 清理失败"
-            )
-            continue
+            if remote_cleanup_failed_count <= 10:
+                add_account_maintenance_log(
+                    f"[账号维护] 远端 CPA 清理失败，但继续执行本地删除: {account_label}"
+                )
 
         if cleanup_local:
             try:
@@ -401,8 +575,16 @@ def run_account_maintenance_once(settings: Settings) -> AccountMaintenanceResult
                     clear_current_account_selection_if_matches(db, account.id)
                     if crud.delete_account(db, account.id):
                         local_deleted_count += 1
-                        add_account_maintenance_log(f"[账号维护] 已清理本地账号: {account_label}")
+                        local_deleted_log_sample_count += 1
+                        if local_deleted_log_sample_count <= 10:
+                            if cleanup_remote and not remote_cleanup_ok:
+                                add_account_maintenance_log(
+                                    f"[账号维护] 已清理本地账号（远端 CPA 未同步删除）: {account_label}"
+                                )
+                            else:
+                                add_account_maintenance_log(f"[账号维护] 已清理本地账号: {account_label}")
             except Exception as exc:
+                local_cleanup_failed_count += 1
                 errors.append(f"本地清理失败 {account_label}: {exc}")
         else:
             try:
@@ -414,21 +596,54 @@ def run_account_maintenance_once(settings: Settings) -> AccountMaintenanceResult
                     next_status = AccountStatus.BANNED.value
                 with get_db() as db:
                     crud.update_account(db, account.id, status=next_status)
+                    status_updated_count += 1
             except Exception as exc:
                 errors.append(f"状态更新失败 {account_label}: {exc}")
 
-        _publish_account_maintenance_status(
+        _maybe_publish_account_maintenance_progress(
+            force=(total_accounts == 1),
             current_index=total_accounts,
             completed=total_accounts,
             success=valid_count,
             failed=invalid_count,
+            skipped=skipped_count,
             total=total_accounts,
+        )
+
+    if skipped_count > 0:
+        add_account_maintenance_log(
+            f"[账号维护] 本轮共跳过校验 {skipped_count} 个账号（原因：未达到最小校验间隔）"
+        )
+    if invalid_count > validation_failed_log_sample_count:
+        add_account_maintenance_log(
+            f"[账号维护] 另有 {invalid_count - validation_failed_log_sample_count} 个账号验证失败，已省略逐条日志"
+        )
+    if validation_exception_count > 5:
+        add_account_maintenance_log(
+            f"[账号维护] 另有 {validation_exception_count - 5} 个账号验证异常，已省略逐条日志"
+        )
+    if remote_cleanup_failed_count > 10:
+        add_account_maintenance_log(
+            f"[账号维护] 另有 {remote_cleanup_failed_count - 10} 次远端 CPA 清理失败，已省略逐条日志"
+        )
+    if local_deleted_count > local_deleted_log_sample_count:
+        add_account_maintenance_log(
+            f"[账号维护] 另有 {local_deleted_count - local_deleted_log_sample_count} 个本地账号已清理，已省略逐条日志"
+        )
+    if local_cleanup_failed_count > 0:
+        add_account_maintenance_log(
+            f"[账号维护] 本轮本地清理失败 {local_cleanup_failed_count} 次，请查看错误汇总"
+        )
+    if status_updated_count > 0:
+        add_account_maintenance_log(
+            f"[账号维护] 本轮共更新 {status_updated_count} 个账号状态（未启用本地删除）"
         )
 
     return AccountMaintenanceResult(
         total_accounts=total_accounts,
         valid_count=valid_count,
         invalid_count=invalid_count,
+        skipped_count=skipped_count,
         local_deleted_count=local_deleted_count,
         remote_deleted_count=remote_deleted_count,
         errors=errors,
@@ -472,6 +687,7 @@ class AccountMaintenanceCoordinator:
         self._wake_event.set()
 
     def request_reconfigure(self) -> None:
+        self._cancel_requested = True
         self._wake_event.set()
 
     def is_cancellation_requested(self) -> bool:
@@ -497,8 +713,7 @@ class AccountMaintenanceCoordinator:
                 current_index=0,
             )
             update_account_maintenance_state(
-                enabled=bool(settings.account_maintenance_enabled),
-                schedule_time=settings.account_maintenance_schedule_time,
+                message="等待计划执行",
             )
             if not settings.account_maintenance_enabled:
                 self._cancel_requested = True
@@ -523,6 +738,7 @@ class AccountMaintenanceCoordinator:
                 "total_accounts": result.total_accounts,
                 "valid_count": result.valid_count,
                 "invalid_count": result.invalid_count,
+                "skipped_count": result.skipped_count,
                 "local_deleted_count": result.local_deleted_count,
                 "remote_deleted_count": result.remote_deleted_count,
                 "error_count": len(result.errors),
@@ -535,7 +751,7 @@ class AccountMaintenanceCoordinator:
                 completed=result.total_accounts,
                 success=result.valid_count,
                 failed=result.invalid_count,
-                skipped=0,
+                skipped=result.skipped_count,
                 current_index=result.total_accounts,
             )
             update_account_maintenance_state(
@@ -546,7 +762,7 @@ class AccountMaintenanceCoordinator:
             )
             add_account_maintenance_log(
                 "[账号维护] 执行完成: "
-                f"总数 {result.total_accounts}, 有效 {result.valid_count}, 无效 {result.invalid_count}, "
+                f"总数 {result.total_accounts}, 有效 {result.valid_count}, 无效 {result.invalid_count}, 跳过 {result.skipped_count}, "
                 f"本地清理 {result.local_deleted_count}, 远端清理 {result.remote_deleted_count}"
             )
             for error in result.errors:
@@ -559,12 +775,12 @@ class AccountMaintenanceCoordinator:
                 break
             settings = self._settings_getter()
             enabled = bool(settings.account_maintenance_enabled)
+            schedule_mode = str(getattr(settings, "account_maintenance_schedule_mode", "daily") or "daily")
             schedule_time = str(settings.account_maintenance_schedule_time or "03:00")
+            schedule_cron = str(getattr(settings, "account_maintenance_schedule_cron", "0 3 * * *") or "0 3 * * *")
             if enabled and _catchup_due_run(settings):
                 self._run_requested = True
                 update_account_maintenance_state(
-                    enabled=enabled,
-                    schedule_time=schedule_time,
                     status="catching_up",
                     message="检测到错过计划时间，正在补执行账号自动维护",
                     next_run_at=None,
@@ -586,12 +802,14 @@ class AccountMaintenanceCoordinator:
                     add_account_maintenance_log("[账号维护] 补执行失败，请检查服务端日志")
                 continue
             try:
-                next_run_at = compute_next_run_at(schedule_time)
+                next_run_at = compute_next_run_at(
+                    schedule_time,
+                    schedule_mode=schedule_mode,
+                    schedule_cron=schedule_cron,
+                )
             except ValueError as exc:
                 logger.warning("账号自动维护计划时间无效: %s", exc)
                 update_account_maintenance_state(
-                    enabled=enabled,
-                    schedule_time=schedule_time,
                     status="error",
                     message=f"计划时间无效: {exc}",
                     next_run_at=None,
@@ -607,8 +825,6 @@ class AccountMaintenanceCoordinator:
                     break
                 continue
             update_account_maintenance_state(
-                enabled=enabled,
-                schedule_time=schedule_time,
                 next_run_at=None if not enabled else next_run_at.isoformat(),
                 status="disabled" if not enabled else _account_maintenance_state.get("status", "idle"),
                 message="账号自动维护已禁用" if not enabled else _account_maintenance_state.get("message", "等待计划执行"),

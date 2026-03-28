@@ -41,6 +41,7 @@ _task_cancelled: Dict[str, bool] = {}
 _batch_status: Dict[str, dict] = {}
 _batch_logs: Dict[str, List[str]] = defaultdict(list)
 _batch_locks: Dict[str, threading.Lock] = {}
+_MAX_BATCH_LOG_LINES = 1000
 
 
 def _get_log_lock(task_uuid: str) -> threading.Lock:
@@ -251,6 +252,8 @@ class TaskManager:
         # 广播后再添加到队列
         with _get_batch_lock(batch_id):
             _batch_logs[batch_id].append(log_message)
+            if len(_batch_logs[batch_id]) > _MAX_BATCH_LOG_LINES:
+                _batch_logs[batch_id] = _batch_logs[batch_id][-_MAX_BATCH_LOG_LINES:]
 
     async def _broadcast_batch_log(self, batch_id: str, log_message: str):
         """广播批量任务日志"""

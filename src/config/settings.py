@@ -327,17 +327,41 @@ SETTING_DEFINITIONS: Dict[str, SettingDefinition] = {
         category=SettingCategory.REGISTRATION,
         description="是否启用账号自动验证与清理"
     ),
+    "account_maintenance_schedule_mode": SettingDefinition(
+        db_key="account.maintenance.schedule_mode",
+        default_value="daily",
+        category=SettingCategory.REGISTRATION,
+        description="账号自动维护调度模式（daily 或 cron）"
+    ),
     "account_maintenance_schedule_time": SettingDefinition(
         db_key="account.maintenance.schedule_time",
         default_value="03:00",
         category=SettingCategory.REGISTRATION,
         description="账号自动验证与清理每日执行时间（HH:MM）"
     ),
+    "account_maintenance_schedule_cron": SettingDefinition(
+        db_key="account.maintenance.schedule_cron",
+        default_value="0 3 * * *",
+        category=SettingCategory.REGISTRATION,
+        description="账号自动维护的 Cron 表达式（5 段）"
+    ),
     "account_maintenance_validation_proxy": SettingDefinition(
         db_key="account.maintenance.validation_proxy",
         default_value="",
         category=SettingCategory.REGISTRATION,
         description="账号自动验证使用的固定代理地址"
+    ),
+    "account_maintenance_validation_interval_minutes": SettingDefinition(
+        db_key="account.maintenance.validation_interval_minutes",
+        default_value=1440,
+        category=SettingCategory.REGISTRATION,
+        description="账号自动验证最小校验间隔（分钟）"
+    ),
+    "account_maintenance_debug_enabled": SettingDefinition(
+        db_key="account.maintenance.debug_enabled",
+        default_value=False,
+        category=SettingCategory.REGISTRATION,
+        description="是否启用账号自动维护调试接口"
     ),
     "account_maintenance_cleanup_local": SettingDefinition(
         db_key="account.maintenance.cleanup_local",
@@ -849,8 +873,12 @@ class Settings(BaseModel):
     registration_auto_mode: str = "pipeline"
     registration_auto_cpa_service_id: int = 0
     account_maintenance_enabled: bool = False
+    account_maintenance_schedule_mode: str = "daily"
     account_maintenance_schedule_time: str = "03:00"
+    account_maintenance_schedule_cron: str = "0 3 * * *"
     account_maintenance_validation_proxy: str = ""
+    account_maintenance_validation_interval_minutes: int = 1440
+    account_maintenance_debug_enabled: bool = False
     account_maintenance_cleanup_local: bool = False
     account_maintenance_cleanup_remote_cpa: bool = False
     account_maintenance_cpa_service_id: int = 0

@@ -147,9 +147,122 @@ def _delete_cpa_auth_file_by_name(upload_url: str, filename: str, api_token: str
             impersonate="chrome110",
         )
         last_response = response
-        if response.status_code in (200, 202, 204, 404):
+        if response.status_code in (200, 202, 204):
+            return response
+        if response.status_code == 404 and candidate != candidates[-1]:
+            continue
+        if response.status_code == 404:
             return response
     return last_response
+
+
+def probe_cpaproxyapi_compatibility(
+    api_url: str,
+    api_token: str,
+    email: Optional[str] = None,
+    proxy_url: Optional[str] = None,
+) -> dict:
+    """探测 CLIProxyAPI auth-files 列表/删除接口兼容性。"""
+    normalized_url = _normalize_cpa_auth_files_url(api_url)
+    result = {
+        "normalized_auth_files_url": normalized_url,
+        "email": str(email or "").strip().lower() or None,
+        "list_probe": {
+            "ok": False,
+            "message": None,
+            "payload_kind": None,
+            "file_count": 0,
+            "sample_names": [],
+            "name_fields_seen": [],
+        },
+        "delete_probe": {
+            "filename": None,
+            "strategies": [],
+            "recommended_strategy": None,
+        },
+    }
+
+    success, payload, message = list_cpa_auth_files(api_url, api_token, proxy_url=proxy_url)
+    result["list_probe"]["ok"] = bool(success)
+    result["list_probe"]["message"] = message
+    if not success:
+        return result
+
+    if isinstance(payload, dict):
+        files = payload.get("files", [])
+        result["list_probe"]["payload_kind"] = "dict"
+    elif isinstance(payload, list):
+        files = payload
+        result["list_probe"]["payload_kind"] = "list"
+    else:
+        files = []
+        result["list_probe"]["payload_kind"] = type(payload).__name__
+
+    sample_names: list[str] = []
+    name_fields_seen: set[str] = set()
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        for key in ("name", "filename", "file_name", "path"):
+            value = str(item.get(key) or "").strip()
+            if value:
+                name_fields_seen.add(key)
+                if len(sample_names) < 10:
+                    sample_names.append(value)
+                break
+
+    result["list_probe"]["file_count"] = len(files) if isinstance(files, list) else 0
+    result["list_probe"]["sample_names"] = sample_names
+    result["list_probe"]["name_fields_seen"] = sorted(name_fields_seen)
+
+    if not result["email"]:
+        return result
+
+    filename = _match_auth_file_name(payload, result["email"])
+    result["delete_probe"]["filename"] = filename
+    if not filename:
+        return result
+
+    encoded_name = quote(filename)
+    strategies = [
+        ("query_name", f"{normalized_url}?name={encoded_name}"),
+        ("path_segment", f"{normalized_url}/{encoded_name}"),
+        ("query_filename", f"{normalized_url}?filename={encoded_name}"),
+        ("query_path", f"{normalized_url}?path={encoded_name}"),
+    ]
+    proxies = _build_cpa_proxies(proxy_url)
+    for strategy_name, candidate_url in strategies:
+        probe_item = {
+            "strategy": strategy_name,
+            "url": candidate_url,
+            "status_code": None,
+            "ok": False,
+            "response_hint": None,
+        }
+        try:
+            response = cffi_requests.delete(
+                candidate_url,
+                headers=_build_cpa_headers(api_token),
+                proxies=proxies,
+                timeout=15,
+                impersonate="chrome110",
+            )
+            probe_item["status_code"] = response.status_code
+            probe_item["ok"] = response.status_code in (200, 202, 204)
+            if response.status_code >= 400:
+                probe_item["response_hint"] = _extract_cpa_error(response)
+            elif response.status_code not in (200, 202, 204):
+                probe_item["response_hint"] = f"HTTP {response.status_code}"
+        except Exception as exc:
+            probe_item["response_hint"] = str(exc)
+        result["delete_probe"]["strategies"].append(probe_item)
+
+    for item in result["delete_probe"]["strategies"]:
+        if item["ok"]:
+            result["delete_probe"]["recommended_strategy"] = item["strategy"]
+            break
+
+    return result
 
 
 def generate_token_json(account: Account) -> dict:
