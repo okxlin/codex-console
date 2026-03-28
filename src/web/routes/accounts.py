@@ -2239,6 +2239,20 @@ def _build_inbox_config(db, service_type, email: str) -> dict:
             "max_retries": settings.yyds_mail_max_retries,
         }
 
+    if service_type == EST.CODEX_OTP:
+        settings = get_settings()
+        if settings.codex_otp_enabled and settings.codex_otp_base_url and settings.codex_otp_admin_token:
+            return {
+                "base_url": settings.codex_otp_base_url,
+                "admin_token": settings.codex_otp_admin_token.get_secret_value() if settings.codex_otp_admin_token else "",
+                "custom_auth": settings.codex_otp_custom_auth.get_secret_value() if settings.codex_otp_custom_auth else "",
+                "domain": settings.codex_otp_domain,
+                "timeout": settings.codex_otp_timeout,
+                "max_retries": settings.codex_otp_max_retries,
+                "poll_interval": settings.codex_otp_poll_interval,
+                "ttl_seconds": settings.codex_otp_ttl_seconds,
+            }
+
     if service_type == EST.MOE_MAIL:
         # 按域名后缀匹配，找不到则取 priority 最小的
         domain = email.split("@")[1] if "@" in email else ""
@@ -2267,6 +2281,7 @@ def _build_inbox_config(db, service_type, email: str) -> dict:
         EST.DUCK_MAIL: "duck_mail",
         EST.FREEMAIL: "freemail",
         EST.IMAP_MAIL: "imap_mail",
+        EST.CODEX_OTP: "codex_otp",
         EST.OUTLOOK: "outlook",
     }
     db_type = type_map.get(service_type)

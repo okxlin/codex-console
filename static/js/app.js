@@ -28,6 +28,7 @@ let availableServices = {
     outlook: { available: false, services: [] },
     moe_mail: { available: false, services: [] },
     temp_mail: { available: false, services: [] },
+    codex_otp: { available: false, services: [] },
     duck_mail: { available: false, services: [] },
     freemail: { available: false, services: [] }
 };
@@ -410,6 +411,24 @@ function updateEmailServiceOptions() {
         select.appendChild(optgroup);
     }
 
+    if (availableServices.codex_otp && availableServices.codex_otp.available) {
+        const optgroup = document.createElement('optgroup');
+        optgroup.label = `🧩 Codex OTP (${availableServices.codex_otp.count} 个服务)`;
+
+        availableServices.codex_otp.services.forEach(service => {
+            const option = document.createElement('option');
+            option.value = `codex_otp:${service.id || 'default'}`;
+            option.textContent = service.name + (service.domain ? ` (@${service.domain})` : '');
+            option.dataset.type = 'codex_otp';
+            if (service.id) {
+                option.dataset.serviceId = service.id;
+            }
+            optgroup.appendChild(option);
+        });
+
+        select.appendChild(optgroup);
+    }
+
     // DuckMail
     if (availableServices.duck_mail && availableServices.duck_mail.available) {
         const optgroup = document.createElement('optgroup');
@@ -487,6 +506,11 @@ function handleServiceChange(e) {
         const service = availableServices.temp_mail.services.find(s => s.id == id);
         if (service) {
             addLog('info', `[系统] 已选择 Temp-Mail 自部署服务: ${service.name}`);
+        }
+    } else if (type === 'codex_otp') {
+        const service = availableServices.codex_otp.services.find(s => (s.id || 'default') == id);
+        if (service) {
+            addLog('info', `[系统] 已选择 Codex OTP 服务: ${service.name}`);
         }
     } else if (type === 'duck_mail') {
         const service = availableServices.duck_mail.services.find(s => s.id == id);

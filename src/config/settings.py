@@ -23,6 +23,7 @@ class SettingCategory(str, Enum):
     REGISTRATION = "registration"
     EMAIL = "email"
     TEMPMAIL = "tempmail"
+    CODEX_OTP = "codex_otp"
     CUSTOM_DOMAIN = "moe_mail"
     SECURITY = "security"
     CPA = "cpa"
@@ -453,6 +454,63 @@ SETTING_DEFINITIONS: Dict[str, SettingDefinition] = {
         description="YYDS Mail 最大重试次数"
     ),
 
+    "codex_otp_enabled": SettingDefinition(
+        db_key="codex_otp.enabled",
+        default_value=False,
+        category=SettingCategory.CODEX_OTP,
+        description="是否启用 Codex OTP 专用邮箱后端"
+    ),
+    "codex_otp_base_url": SettingDefinition(
+        db_key="codex_otp.base_url",
+        default_value="",
+        category=SettingCategory.CODEX_OTP,
+        description="Codex OTP Worker 地址"
+    ),
+    "codex_otp_admin_token": SettingDefinition(
+        db_key="codex_otp.admin_token",
+        default_value="",
+        category=SettingCategory.CODEX_OTP,
+        description="Codex OTP 管理令牌",
+        is_secret=True
+    ),
+    "codex_otp_custom_auth": SettingDefinition(
+        db_key="codex_otp.custom_auth",
+        default_value="",
+        category=SettingCategory.CODEX_OTP,
+        description="Codex OTP 自定义访问口令",
+        is_secret=True
+    ),
+    "codex_otp_domain": SettingDefinition(
+        db_key="codex_otp.domain",
+        default_value="",
+        category=SettingCategory.CODEX_OTP,
+        description="Codex OTP 默认邮箱域名"
+    ),
+    "codex_otp_timeout": SettingDefinition(
+        db_key="codex_otp.timeout",
+        default_value=30,
+        category=SettingCategory.CODEX_OTP,
+        description="Codex OTP 请求超时时间"
+    ),
+    "codex_otp_max_retries": SettingDefinition(
+        db_key="codex_otp.max_retries",
+        default_value=3,
+        category=SettingCategory.CODEX_OTP,
+        description="Codex OTP 请求最大重试次数"
+    ),
+    "codex_otp_poll_interval": SettingDefinition(
+        db_key="codex_otp.poll_interval",
+        default_value=3,
+        category=SettingCategory.CODEX_OTP,
+        description="Codex OTP 轮询间隔（秒）"
+    ),
+    "codex_otp_ttl_seconds": SettingDefinition(
+        db_key="codex_otp.ttl_seconds",
+        default_value=1800,
+        category=SettingCategory.CODEX_OTP,
+        description="Codex OTP 地址默认生存时间（秒）"
+    ),
+
     # 自定义域名邮箱配置
     "custom_domain_base_url": SettingDefinition(
         db_key="custom_domain.base_url",
@@ -595,6 +653,11 @@ SETTING_TYPES: Dict[str, Type] = {
     "yyds_mail_enabled": bool,
     "yyds_mail_timeout": int,
     "yyds_mail_max_retries": int,
+    "codex_otp_enabled": bool,
+    "codex_otp_timeout": int,
+    "codex_otp_max_retries": int,
+    "codex_otp_poll_interval": int,
+    "codex_otp_ttl_seconds": int,
     "tm_enabled": bool,
     "cpa_enabled": bool,
     "email_code_timeout": int,
@@ -897,6 +960,15 @@ class Settings(BaseModel):
     yyds_mail_default_domain: str = ""
     yyds_mail_timeout: int = 30
     yyds_mail_max_retries: int = 3
+    codex_otp_enabled: bool = False
+    codex_otp_base_url: str = ""
+    codex_otp_admin_token: Optional[SecretStr] = None
+    codex_otp_custom_auth: Optional[SecretStr] = None
+    codex_otp_domain: str = ""
+    codex_otp_timeout: int = 30
+    codex_otp_max_retries: int = 3
+    codex_otp_poll_interval: int = 3
+    codex_otp_ttl_seconds: int = 1800
 
     # 自定义域名邮箱配置
     custom_domain_base_url: str = ""

@@ -40,6 +40,7 @@ class EmailServiceType(str, Enum):
     FREEMAIL = "freemail"
     IMAP_MAIL = "imap_mail"
     CLOUDMAIL = "cloudmail"
+    CODEX_OTP = "codex_otp"
 
 
 # ============================================================================
@@ -147,6 +148,16 @@ EMAIL_SERVICE_DEFAULTS = {
         "use_ssl": True,
         "email": "",
         "password": "",
+        "timeout": 30,
+        "max_retries": 3,
+    },
+    "codex_otp": {
+        "base_url": "",
+        "admin_token": "",
+        "custom_auth": "",
+        "domain": "",
+        "ttl_seconds": 1800,
+        "poll_interval": 3,
         "timeout": 30,
         "max_retries": 3,
     }
