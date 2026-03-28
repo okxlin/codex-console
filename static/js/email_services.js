@@ -4,7 +4,7 @@
 
 // 状态
 let outlookServices = [];
-let customServices = [];  // 合并 moe_mail + temp_mail + codex_otp + duck_mail + freemail + imap_mail
+let customServices = [];  // 合并 moe_mail + temp_mail + codex_otp + codex_otp_d1 + duck_mail + freemail + imap_mail
 let selectedOutlook = new Set();
 let selectedCustom = new Set();
 
@@ -59,6 +59,7 @@ const elements = {
     addYydsMailFields: document.getElementById('add-yydsmail-fields'),
     addTempmailFields: document.getElementById('add-tempmail-fields'),
     addCodexOtpFields: document.getElementById('add-codexotp-fields'),
+    addCodexOtpD1Fields: document.getElementById('add-codexotpd1-fields'),
     addDuckmailFields: document.getElementById('add-duckmail-fields'),
     addFreemailFields: document.getElementById('add-freemail-fields'),
     addImapFields: document.getElementById('add-imap-fields'),
@@ -72,6 +73,7 @@ const elements = {
     editYydsMailFields: document.getElementById('edit-yydsmail-fields'),
     editTempmailFields: document.getElementById('edit-tempmail-fields'),
     editCodexOtpFields: document.getElementById('edit-codexotp-fields'),
+    editCodexOtpD1Fields: document.getElementById('edit-codexotpd1-fields'),
     editDuckmailFields: document.getElementById('edit-duckmail-fields'),
     editFreemailFields: document.getElementById('edit-freemail-fields'),
     editImapFields: document.getElementById('edit-imap-fields'),
@@ -86,6 +88,14 @@ const elements = {
     codexOtpProvisionSubmit: document.getElementById('codex-otp-provision-submit'),
     codexOtpProvisionResult: document.getElementById('codex-otp-provision-result'),
 
+    codexOtpD1ProvisionBtn: document.getElementById('open-codex-otp-d1-provision-btn'),
+    codexOtpD1ProvisionModal: document.getElementById('codex-otp-d1-provision-modal'),
+    codexOtpD1ProvisionForm: document.getElementById('codex-otp-d1-provision-form'),
+    closeCodexOtpD1ProvisionModal: document.getElementById('close-codex-otp-d1-provision-modal'),
+    cancelCodexOtpD1Provision: document.getElementById('cancel-codex-otp-d1-provision'),
+    codexOtpD1ProvisionSubmit: document.getElementById('codex-otp-d1-provision-submit'),
+    codexOtpD1ProvisionResult: document.getElementById('codex-otp-d1-provision-result'),
+
     // 编辑 Outlook 模态框
     editOutlookModal: document.getElementById('edit-outlook-modal'),
     editOutlookForm: document.getElementById('edit-outlook-form'),
@@ -98,6 +108,7 @@ const CUSTOM_SUBTYPE_LABELS = {
     moemail: '🔗 MoeMail（自定义域名 API）',
     tempmail: '📮 TempMail（自部署 Cloudflare Worker）',
     codexotp: '🧩 Codex OTP（专用 OTP Worker）',
+    codexotpd1: '🗄️ Codex OTP D1（只读 D1 模式）',
     duckmail: '🦆 DuckMail（DuckMail API）',
     freemail: 'Freemail（自部署 Cloudflare Worker）',
     imap: '📧 IMAP 邮箱（Gmail/QQ/163等）'
@@ -188,6 +199,17 @@ function initEventListeners() {
         elements.codexOtpProvisionForm.addEventListener('submit', handleProvisionCodexOtp);
     }
 
+    if (elements.codexOtpD1ProvisionBtn) {
+        elements.codexOtpD1ProvisionBtn.addEventListener('click', () => {
+            elements.codexOtpD1ProvisionForm.reset();
+            elements.codexOtpD1ProvisionResult.style.display = 'none';
+            elements.codexOtpD1ProvisionModal.classList.add('active');
+        });
+        elements.closeCodexOtpD1ProvisionModal.addEventListener('click', () => elements.codexOtpD1ProvisionModal.classList.remove('active'));
+        elements.cancelCodexOtpD1Provision.addEventListener('click', () => elements.codexOtpD1ProvisionModal.classList.remove('active'));
+        elements.codexOtpD1ProvisionForm.addEventListener('submit', handleProvisionCodexOtpD1);
+    }
+
     // 临时邮箱配置
     elements.tempmailForm.addEventListener('submit', handleSaveTempmail);
     elements.testTempmailBtn.addEventListener('click', handleTestTempmail);
@@ -219,6 +241,7 @@ function switchAddSubType(subType) {
     elements.addYydsMailFields.style.display = subType === 'yydsmail' ? '' : 'none';
     elements.addTempmailFields.style.display = subType === 'tempmail' ? '' : 'none';
     elements.addCodexOtpFields.style.display = subType === 'codexotp' ? '' : 'none';
+    elements.addCodexOtpD1Fields.style.display = subType === 'codexotpd1' ? '' : 'none';
     elements.addDuckmailFields.style.display = subType === 'duckmail' ? '' : 'none';
     elements.addFreemailFields.style.display = subType === 'freemail' ? '' : 'none';
     elements.addImapFields.style.display = subType === 'imap' ? '' : 'none';
@@ -231,6 +254,7 @@ function switchEditSubType(subType) {
     elements.editYydsMailFields.style.display = subType === 'yydsmail' ? '' : 'none';
     elements.editTempmailFields.style.display = subType === 'tempmail' ? '' : 'none';
     elements.editCodexOtpFields.style.display = subType === 'codexotp' ? '' : 'none';
+    elements.editCodexOtpD1Fields.style.display = subType === 'codexotpd1' ? '' : 'none';
     elements.editDuckmailFields.style.display = subType === 'duckmail' ? '' : 'none';
     elements.editFreemailFields.style.display = subType === 'freemail' ? '' : 'none';
     elements.editImapFields.style.display = subType === 'imap' ? '' : 'none';
@@ -242,7 +266,7 @@ async function loadStats() {
     try {
         const data = await api.get('/email-services/stats');
         elements.outlookCount.textContent = data.outlook_count || 0;
-        elements.customCount.textContent = (data.custom_count || 0) + (data.yyds_mail_count || 0) + (data.temp_mail_count || 0) + (data.codex_otp_count || 0) + (data.duck_mail_count || 0) + (data.freemail_count || 0) + (data.imap_mail_count || 0);
+        elements.customCount.textContent = (data.custom_count || 0) + (data.yyds_mail_count || 0) + (data.temp_mail_count || 0) + (data.codex_otp_count || 0) + (data.codex_otp_d1_count || 0) + (data.duck_mail_count || 0) + (data.freemail_count || 0) + (data.imap_mail_count || 0);
         if (elements.codexOtpCount) {
             elements.codexOtpCount.textContent = data.codex_otp_count || 0;
         }
@@ -348,6 +372,9 @@ function getCustomServiceTypeBadge(subType) {
     if (subType === 'codexotp') {
         return '<span class="status-badge" style="background-color:#00695c;color:white;">Codex OTP</span>';
     }
+    if (subType === 'codexotpd1') {
+        return '<span class="status-badge" style="background-color:#2e7d32;color:white;">Codex OTP D1</span>';
+    }
     if (subType === 'duckmail') {
         return '<span class="status-badge success">DuckMail</span>';
     }
@@ -368,6 +395,11 @@ function getCustomServiceAddress(service) {
         const domain = service.config?.domain || '';
         return `${escapeHtml(baseUrl)}<div style="color: var(--text-muted); margin-top: 4px;">OTP 域名：@${escapeHtml(domain)}</div>`;
     }
+    if (service._subType === 'codexotpd1') {
+        const domain = service.config?.domain || '-';
+        const databaseId = service.config?.cf_database_id || '-';
+        return `D1 只读模式<div style="color: var(--text-muted); margin-top: 4px;">@${escapeHtml(domain)} / DB: ${escapeHtml(databaseId)}</div>`;
+    }
     const baseUrl = service.config?.base_url || '-';
     const domain = service.config?.default_domain || service.config?.domain;
     if (!domain) {
@@ -379,11 +411,12 @@ function getCustomServiceAddress(service) {
 // 加载自定义邮箱服务（moe_mail + temp_mail + codex_otp + duck_mail + freemail 合并）
 async function loadCustomServices() {
     try {
-        const [r1, r2, r3, r4, r5, r6, r7] = await Promise.all([
+        const [r1, r2, r3, r4, r5, r6, r7, r8] = await Promise.all([
             api.get('/email-services?service_type=moe_mail'),
             api.get('/email-services?service_type=yyds_mail'),
             api.get('/email-services?service_type=temp_mail'),
             api.get('/email-services?service_type=codex_otp'),
+            api.get('/email-services?service_type=codex_otp_d1'),
             api.get('/email-services?service_type=duck_mail'),
             api.get('/email-services?service_type=freemail'),
             api.get('/email-services?service_type=imap_mail')
@@ -393,9 +426,10 @@ async function loadCustomServices() {
             ...(r2.services || []).map(s => ({ ...s, _subType: 'yydsmail' })),
             ...(r3.services || []).map(s => ({ ...s, _subType: 'tempmail' })),
             ...(r4.services || []).map(s => ({ ...s, _subType: 'codexotp' })),
-            ...(r5.services || []).map(s => ({ ...s, _subType: 'duckmail' })),
-            ...(r6.services || []).map(s => ({ ...s, _subType: 'freemail' })),
-            ...(r7.services || []).map(s => ({ ...s, _subType: 'imap' }))
+            ...(r5.services || []).map(s => ({ ...s, _subType: 'codexotpd1' })),
+            ...(r6.services || []).map(s => ({ ...s, _subType: 'duckmail' })),
+            ...(r7.services || []).map(s => ({ ...s, _subType: 'freemail' })),
+            ...(r8.services || []).map(s => ({ ...s, _subType: 'imap' }))
         ];
 
         if (customServices.length === 0) {
@@ -550,6 +584,16 @@ async function handleAddCustom(e) {
             ttl_seconds: 1800,
             poll_interval: 3
         };
+    } else if (subType === 'codexotpd1') {
+        serviceType = 'codex_otp_d1';
+        config = {
+            domain: formData.get('codexd1_domain'),
+            cf_account_id: formData.get('codexd1_account_id'),
+            cf_database_id: formData.get('codexd1_database_id'),
+            cf_runtime_api_token: formData.get('codexd1_runtime_token'),
+            poll_interval: 3,
+            timeout: 30
+        };
     } else if (subType === 'duckmail') {
         serviceType = 'duck_mail';
         config = {
@@ -582,6 +626,10 @@ async function handleAddCustom(e) {
     }
     if (subType === 'codexotp' && (!config.base_url || !config.admin_token || !config.domain)) {
         toast.error('Codex OTP 需要填写 Worker 地址、Admin Token 和邮箱域名');
+        return;
+    }
+    if (subType === 'codexotpd1' && (!config.domain || !config.cf_account_id || !config.cf_database_id || !config.cf_runtime_api_token)) {
+        toast.error('Codex OTP D1 需要填写域名、Account ID、Database ID 和 D1 只读 Token');
         return;
     }
 
@@ -786,6 +834,8 @@ async function editCustomService(id, subType) {
                     ? 'yydsmail'
                 : service.service_type === 'codex_otp'
                     ? 'codexotp'
+                : service.service_type === 'codex_otp_d1'
+                    ? 'codexotpd1'
                 : service.service_type === 'duck_mail'
                     ? 'duckmail'
                     : service.service_type === 'freemail'
@@ -824,6 +874,12 @@ async function editCustomService(id, subType) {
             document.getElementById('edit-codex-custom-auth').value = '';
             document.getElementById('edit-codex-custom-auth').placeholder = service.config?.custom_auth ? '已设置，留空保持不变' : '可选';
             document.getElementById('edit-codex-domain').value = service.config?.domain || '';
+        } else if (resolvedSubType === 'codexotpd1') {
+            document.getElementById('edit-codexd1-domain').value = service.config?.domain || '';
+            document.getElementById('edit-codexd1-account-id').value = service.config?.cf_account_id || '';
+            document.getElementById('edit-codexd1-database-id').value = service.config?.cf_database_id || '';
+            document.getElementById('edit-codexd1-runtime-token').value = '';
+            document.getElementById('edit-codexd1-runtime-token').placeholder = service.config?.has_runtime_api_token ? '已设置，留空保持不变' : '请输入 D1 只读 Token';
         } else if (resolvedSubType === 'duckmail') {
             document.getElementById('edit-dm-base-url').value = service.config?.base_url || '';
             document.getElementById('edit-dm-api-key').value = '';
@@ -891,6 +947,16 @@ async function handleEditCustom(e) {
         const customAuth = formData.get('codex_custom_auth');
         if (token && token.trim()) config.admin_token = token.trim();
         if (customAuth && customAuth.trim()) config.custom_auth = customAuth.trim();
+    } else if (subType === 'codexotpd1') {
+        config = {
+            domain: formData.get('codexd1_domain'),
+            cf_account_id: formData.get('codexd1_account_id'),
+            cf_database_id: formData.get('codexd1_database_id'),
+            poll_interval: 3,
+            timeout: 30
+        };
+        const runtimeToken = formData.get('codexd1_runtime_token');
+        if (runtimeToken && runtimeToken.trim()) config.cf_runtime_api_token = runtimeToken.trim();
     } else if (subType === 'duckmail') {
         config = {
             base_url: formData.get('dm_base_url'),
@@ -1012,6 +1078,13 @@ async function handleProvisionCodexOtp(e) {
         priority: 0
     };
 
+    if (payload.route_pattern && !payload.zone_id) {
+        elements.codexOtpProvisionResult.style.display = 'block';
+        elements.codexOtpProvisionResult.innerHTML = `<div class="import-errors"><strong>初始化失败：</strong>填写 HTTP Route 时必须同时填写 Zone ID；如果你打算手工绑定 Route，请清空 HTTP Route 字段后再初始化。</div>`;
+        toast.error('HTTP Route 需要搭配 Zone ID');
+        return;
+    }
+
     elements.codexOtpProvisionSubmit.disabled = true;
     elements.codexOtpProvisionSubmit.textContent = '初始化中...';
     elements.codexOtpProvisionResult.style.display = 'none';
@@ -1019,6 +1092,16 @@ async function handleProvisionCodexOtp(e) {
     try {
         const result = await api.post('/email-services/codex-otp/provision', payload);
         const nextSteps = (result.next_steps || []).map(item => `<li>${escapeHtml(item)}</li>`).join('');
+        const steps = result.steps || {};
+        const renderStep = (title, step) => {
+            const status = escapeHtml(step?.status || 'unknown');
+            const message = escapeHtml(step?.message || '');
+            const verified = step?.verified === true ? '已验证' : (step?.verified === false ? '未验证' : '');
+            return `<div style="padding:8px 10px;border:1px solid var(--border-color);border-radius:8px;margin-top:8px;">
+                <div><strong>${title}</strong> - <code>${status}</code>${verified ? ` <span style="color:var(--text-muted)">${verified}</span>` : ''}</div>
+                <div style="color:var(--text-muted);margin-top:4px;">${message}</div>
+            </div>`;
+        };
         elements.codexOtpProvisionResult.style.display = 'block';
         elements.codexOtpProvisionResult.innerHTML = `
             <div class="import-stats">
@@ -1028,6 +1111,11 @@ async function handleProvisionCodexOtp(e) {
             <div style="margin-top: var(--spacing-sm); color: var(--text-muted); font-size: 0.875rem;">
                 <div>Worker: <code>${escapeHtml(result.cloudflare?.worker_id || payload.script_name)}</code></div>
                 <div>Base URL: <code>${escapeHtml(result.base_url || result.service?.config?.base_url || '')}</code></div>
+            </div>
+            <div style="margin-top: var(--spacing-sm);">
+                ${renderStep('D1', steps.d1)}
+                ${renderStep('Worker', steps.worker)}
+                ${renderStep('Route', steps.route)}
             </div>
             ${nextSteps ? `<div class="import-errors" style="margin-top: var(--spacing-sm);"><strong>后续步骤：</strong><ul>${nextSteps}</ul></div>` : ''}
         `;
@@ -1041,5 +1129,67 @@ async function handleProvisionCodexOtp(e) {
     } finally {
         elements.codexOtpProvisionSubmit.disabled = false;
         elements.codexOtpProvisionSubmit.textContent = '开始初始化';
+    }
+}
+
+async function handleProvisionCodexOtpD1(e) {
+    e.preventDefault();
+    const formData = new FormData(e.target);
+    const payload = {
+        service_name: formData.get('service_name'),
+        script_name: formData.get('script_name'),
+        database_name: formData.get('database_name'),
+        email_domain: formData.get('email_domain'),
+        account_id: formData.get('account_id'),
+        api_token: formData.get('api_token'),
+        runtime_api_token: formData.get('runtime_api_token'),
+        allow_override: formData.get('allow_override') === 'true',
+        enabled: true,
+        priority: 0
+    };
+
+    elements.codexOtpD1ProvisionSubmit.disabled = true;
+    elements.codexOtpD1ProvisionSubmit.textContent = '初始化中...';
+    elements.codexOtpD1ProvisionResult.style.display = 'none';
+
+    try {
+        const result = await api.post('/email-services/codex-otp-d1/provision', payload);
+        const nextSteps = (result.next_steps || []).map(item => `<li>${escapeHtml(item)}</li>`).join('');
+        const steps = result.steps || {};
+        const renderStep = (title, step) => {
+            const status = escapeHtml(step?.status || 'unknown');
+            const message = escapeHtml(step?.message || '');
+            return `<div style="padding:8px 10px;border:1px solid var(--border-color);border-radius:8px;margin-top:8px;">
+                <div><strong>${title}</strong> - <code>${status}</code></div>
+                <div style="color:var(--text-muted);margin-top:4px;">${message}</div>
+            </div>`;
+        };
+        elements.codexOtpD1ProvisionResult.style.display = 'block';
+        elements.codexOtpD1ProvisionResult.innerHTML = `
+            <div class="import-stats">
+                <span>✅ D1 模式服务已创建: <strong>${escapeHtml(result.service?.name || payload.service_name)}</strong></span>
+                <span>🗄️ D1: <strong>${escapeHtml(result.cloudflare?.database_name || payload.database_name)}</strong></span>
+            </div>
+            <div style="margin-top: var(--spacing-sm); color: var(--text-muted); font-size: 0.875rem;">
+                <div>Email Worker: <code>${escapeHtml(result.cloudflare?.worker_id || payload.script_name)}</code></div>
+                <div>域名: <code>${escapeHtml(result.service?.config?.domain || payload.email_domain)}</code></div>
+            </div>
+            <div style="margin-top: var(--spacing-sm);">
+                ${renderStep('D1', steps.d1)}
+                ${renderStep('Worker', steps.worker)}
+                ${renderStep('Route', steps.route)}
+            </div>
+            ${nextSteps ? `<div class="import-errors" style="margin-top: var(--spacing-sm);"><strong>后续步骤：</strong><ul>${nextSteps}</ul></div>` : ''}
+        `;
+        toast.success('Codex OTP D1 初始化成功');
+        loadCustomServices();
+        loadStats();
+    } catch (error) {
+        elements.codexOtpD1ProvisionResult.style.display = 'block';
+        elements.codexOtpD1ProvisionResult.innerHTML = `<div class="import-errors"><strong>初始化失败：</strong> ${escapeHtml(error.message)}</div>`;
+        toast.error('Codex OTP D1 初始化失败: ' + error.message);
+    } finally {
+        elements.codexOtpD1ProvisionSubmit.disabled = false;
+        elements.codexOtpD1ProvisionSubmit.textContent = '开始初始化';
     }
 }

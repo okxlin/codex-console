@@ -41,6 +41,7 @@ class EmailServiceType(str, Enum):
     IMAP_MAIL = "imap_mail"
     CLOUDMAIL = "cloudmail"
     CODEX_OTP = "codex_otp"
+    CODEX_OTP_D1 = "codex_otp_d1"
 
 
 # ============================================================================
@@ -160,6 +161,15 @@ EMAIL_SERVICE_DEFAULTS = {
         "poll_interval": 3,
         "timeout": 30,
         "max_retries": 3,
+    },
+    "codex_otp_d1": {
+        "domain": "",
+        "cf_account_id": "",
+        "cf_database_id": "",
+        "cf_runtime_api_token": "",
+        "poll_interval": 3,
+        "timeout": 30,
+        "address_length": 12,
     }
 }
 

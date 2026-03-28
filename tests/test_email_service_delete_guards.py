@@ -121,3 +121,45 @@ def test_codex_otp_service_config_hides_sensitive_fields(tmp_path, monkeypatch):
     assert "custom_auth" not in result.config
     assert result.config["cloudflare"]["database_id"] == "db-123"
     assert "worker_id" in result.config["cloudflare"]
+
+
+def test_codex_otp_d1_service_config_hides_runtime_token(tmp_path, monkeypatch):
+    db_path = tmp_path / "email_codex_otp_d1_filter.db"
+    manager = DatabaseSessionManager(f"sqlite:///{db_path}")
+    Base.metadata.create_all(bind=manager.engine)
+
+    with manager.session_scope() as session:
+        service = EmailService(
+            service_type="codex_otp_d1",
+            name="Codex OTP D1 Main",
+            config={
+                "domain": "mail.example.com",
+                "cf_account_id": "acc-123",
+                "cf_database_id": "db-123",
+                "cf_runtime_api_token": "secret-runtime-token",
+            },
+            enabled=True,
+            priority=0,
+        )
+        session.add(service)
+        session.flush()
+        service_id = service.id
+
+    @contextmanager
+    def fake_get_db():
+        session = manager.SessionLocal()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    monkeypatch.setattr(email_routes, "get_db", fake_get_db)
+
+    result = asyncio.run(email_routes.get_email_service(service_id))
+
+    assert result.service_type == "codex_otp_d1"
+    assert result.config["domain"] == "mail.example.com"
+    assert result.config["cf_account_id"] == "acc-123"
+    assert result.config["cf_database_id"] == "db-123"
+    assert result.config["has_runtime_api_token"] is True
+    assert "cf_runtime_api_token" not in result.config

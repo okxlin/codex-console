@@ -235,7 +235,7 @@ def _normalize_email_service_config(
     elif service_type == EmailServiceType.YYDS_MAIL:
         if 'domain' in normalized and 'default_domain' not in normalized:
             normalized['default_domain'] = normalized.pop('domain')
-    elif service_type in (EmailServiceType.TEMP_MAIL, EmailServiceType.FREEMAIL, EmailServiceType.CODEX_OTP):
+    elif service_type in (EmailServiceType.TEMP_MAIL, EmailServiceType.FREEMAIL, EmailServiceType.CODEX_OTP, EmailServiceType.CODEX_OTP_D1):
         if 'default_domain' in normalized and 'domain' not in normalized:
             normalized['domain'] = normalized.pop('default_domain')
     elif service_type == EmailServiceType.DUCK_MAIL:
@@ -453,6 +453,35 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                         }
                     else:
                         raise ValueError("没有可用的 Codex OTP 服务，请先在邮箱服务中添加或完成初始化")
+                elif service_type == EmailServiceType.CODEX_OTP_D1:
+                    from ...database.models import EmailService as EmailServiceModel
+
+                    db_service = db.query(EmailServiceModel).filter(
+                        EmailServiceModel.service_type == "codex_otp_d1",
+                        EmailServiceModel.enabled == True
+                    ).order_by(EmailServiceModel.priority.asc()).first()
+
+                    if db_service and db_service.config:
+                        config = _normalize_email_service_config(service_type, db_service.config, actual_proxy_url)
+                        crud.update_registration_task(db, task_uuid, email_service_id=db_service.id)
+                        logger.info(f"使用数据库 Codex OTP D1 服务: {db_service.name}")
+                    elif (
+                        settings.codex_otp_d1_enabled
+                        and settings.codex_otp_d1_domain
+                        and settings.codex_otp_d1_cf_account_id
+                        and settings.codex_otp_d1_cf_database_id
+                        and settings.codex_otp_d1_cf_runtime_api_token
+                    ):
+                        config = {
+                            "domain": settings.codex_otp_d1_domain,
+                            "cf_account_id": settings.codex_otp_d1_cf_account_id,
+                            "cf_database_id": settings.codex_otp_d1_cf_database_id,
+                            "cf_runtime_api_token": settings.codex_otp_d1_cf_runtime_api_token.get_secret_value() if settings.codex_otp_d1_cf_runtime_api_token else "",
+                            "timeout": settings.codex_otp_d1_timeout,
+                            "poll_interval": settings.codex_otp_d1_poll_interval,
+                        }
+                    else:
+                        raise ValueError("没有可用的 Codex OTP D1 服务，请先在邮箱服务中添加或完成配置")
                 else:
                     config = email_service_config or {}
 
@@ -1434,6 +1463,11 @@ async def get_available_email_services():
             "available": False,
             "count": 0,
             "services": []
+        },
+        "codex_otp_d1": {
+            "available": False,
+            "count": 0,
+            "services": []
         }
     }
 
@@ -1446,6 +1480,23 @@ async def get_available_email_services():
             "type": "codex_otp",
             "domain": settings.codex_otp_domain or None,
             "description": "Codex OTP 专用邮箱后端",
+        })
+
+    if (
+        settings.codex_otp_d1_enabled
+        and settings.codex_otp_d1_domain
+        and settings.codex_otp_d1_cf_account_id
+        and settings.codex_otp_d1_cf_database_id
+        and settings.codex_otp_d1_cf_runtime_api_token
+    ):
+        result["codex_otp_d1"]["available"] = True
+        result["codex_otp_d1"]["count"] = 1
+        result["codex_otp_d1"]["services"].append({
+            "id": None,
+            "name": "Codex OTP D1",
+            "type": "codex_otp_d1",
+            "domain": settings.codex_otp_d1_domain or None,
+            "description": "Codex OTP D1 只读模式",
         })
 
     yyds_api_key = settings.yyds_mail_api_key.get_secret_value() if settings.yyds_mail_api_key else ""
@@ -1621,6 +1672,25 @@ async def get_available_email_services():
         if codex_otp_services:
             result["codex_otp"]["count"] = len(result["codex_otp"]["services"])
             result["codex_otp"]["available"] = True
+
+        codex_otp_d1_services = db.query(EmailServiceModel).filter(
+            EmailServiceModel.service_type == "codex_otp_d1",
+            EmailServiceModel.enabled == True
+        ).order_by(EmailServiceModel.priority.asc()).all()
+
+        for service in codex_otp_d1_services:
+            config = service.config or {}
+            result["codex_otp_d1"]["services"].append({
+                "id": service.id,
+                "name": service.name,
+                "type": "codex_otp_d1",
+                "domain": config.get("domain"),
+                "priority": service.priority,
+            })
+
+        if codex_otp_d1_services:
+            result["codex_otp_d1"]["count"] = len(result["codex_otp_d1"]["services"])
+            result["codex_otp_d1"]["available"] = True
 
     return result
 

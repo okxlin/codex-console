@@ -2253,6 +2253,24 @@ def _build_inbox_config(db, service_type, email: str) -> dict:
                 "ttl_seconds": settings.codex_otp_ttl_seconds,
             }
 
+    if service_type == EST.CODEX_OTP_D1:
+        settings = get_settings()
+        if (
+            settings.codex_otp_d1_enabled
+            and settings.codex_otp_d1_domain
+            and settings.codex_otp_d1_cf_account_id
+            and settings.codex_otp_d1_cf_database_id
+            and settings.codex_otp_d1_cf_runtime_api_token
+        ):
+            return {
+                "domain": settings.codex_otp_d1_domain,
+                "cf_account_id": settings.codex_otp_d1_cf_account_id,
+                "cf_database_id": settings.codex_otp_d1_cf_database_id,
+                "cf_runtime_api_token": settings.codex_otp_d1_cf_runtime_api_token.get_secret_value() if settings.codex_otp_d1_cf_runtime_api_token else "",
+                "timeout": settings.codex_otp_d1_timeout,
+                "poll_interval": settings.codex_otp_d1_poll_interval,
+            }
+
     if service_type == EST.MOE_MAIL:
         # 按域名后缀匹配，找不到则取 priority 最小的
         domain = email.split("@")[1] if "@" in email else ""
@@ -2282,6 +2300,7 @@ def _build_inbox_config(db, service_type, email: str) -> dict:
         EST.FREEMAIL: "freemail",
         EST.IMAP_MAIL: "imap_mail",
         EST.CODEX_OTP: "codex_otp",
+        EST.CODEX_OTP_D1: "codex_otp_d1",
         EST.OUTLOOK: "outlook",
     }
     db_type = type_map.get(service_type)

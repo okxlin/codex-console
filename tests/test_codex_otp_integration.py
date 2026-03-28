@@ -69,6 +69,14 @@ class DummyProvisionerConflicts(DummyProvisioner):
         return [{"id": "route-1", "pattern": "otp.example.com/*", "script": "other-worker"}]
 
 
+class DummyProvisionerCreateConflictThenReuse(DummyProvisioner):
+    def create_d1_database(self, name: str, location_hint: str = ""):
+        raise CodexOtpProvisionError("Cloudflare API 请求失败: HTTP 400 - [{'code': 7502, 'message': \"Database with name already exists\"}]")
+
+    def list_d1_databases(self, name: str = ""):
+        return [{"uuid": "db-reused", "name": name or "codex-otp-db"}]
+
+
 def test_build_public_base_url_trims_wildcard():
     assert build_public_base_url("otp.example.com/*") == "https://otp.example.com"
 
@@ -103,6 +111,8 @@ def test_provision_codex_otp_returns_runtime_config(monkeypatch):
     assert result.cloudflare["database_id"] == "db-123"
     assert result.cloudflare["worker_id"] == "codex-otp-main"
     assert result.cloudflare["template_version"] == WORKER_TEMPLATE_VERSION
+    assert result.steps["d1"]["status"] in {"created", "reused"}
+    assert result.steps["worker"]["status"] in {"created", "updated"}
     assert result.next_steps
 
 
@@ -170,7 +180,7 @@ def test_provision_codex_otp_handles_missing_route(monkeypatch):
     result = provision_codex_otp(
         account_id="acc",
         api_token="tok",
-        zone_id="",
+        zone_id="zone-1",
         script_name="codex-otp-main",
         database_name="codex-otp-db",
         route_pattern="otp.example.com/*",
@@ -179,7 +189,7 @@ def test_provision_codex_otp_handles_missing_route(monkeypatch):
     )
 
     assert result.cloudflare["route"] is None
-    assert any("手动为 Worker 绑定一个 HTTP Route" in step for step in result.next_steps)
+    assert any("确认 Workers Route" in step for step in result.next_steps)
 
 
 def test_provision_codex_otp_idempotent_sanitizes_error(monkeypatch):
@@ -193,7 +203,7 @@ def test_provision_codex_otp_idempotent_sanitizes_error(monkeypatch):
         provision_codex_otp_idempotent(
             account_id="acc",
             api_token="tok",
-            zone_id="",
+            zone_id="zone-1",
             script_name="codex-otp-main",
             database_name="codex-otp-db",
             route_pattern="otp.example.com/*",
@@ -254,6 +264,50 @@ def test_provision_codex_otp_rejects_bad_d1_result(monkeypatch):
     assert "D1 返回结果异常" in str(exc_info.value)
 
 
+def test_provision_codex_otp_requires_zone_id_when_route_is_set(monkeypatch):
+    dummy = DummyProvisioner("acc", "tok", "")
+    monkeypatch.setattr(
+        "src.core.codex_otp_provisioner.CloudflareProvisioner",
+        lambda account_id, api_token, zone_id="": dummy,
+    )
+
+    with pytest.raises(CodexOtpProvisionError) as exc_info:
+        provision_codex_otp(
+            account_id="acc",
+            api_token="tok",
+            zone_id="",
+            script_name="codex-otp-main",
+            database_name="codex-otp-db",
+            route_pattern="otp.example.com/*",
+            email_domain="mail.example.com",
+            service_name="Codex OTP Main",
+        )
+
+    assert "必须同时填写 Zone ID" in str(exc_info.value)
+
+
+def test_provision_codex_otp_allows_manual_route_mode_without_route_pattern(monkeypatch):
+    dummy = DummyProvisioner("acc", "tok", "")
+    monkeypatch.setattr(
+        "src.core.codex_otp_provisioner.CloudflareProvisioner",
+        lambda account_id, api_token, zone_id="": dummy,
+    )
+
+    result = provision_codex_otp(
+        account_id="acc",
+        api_token="tok",
+        zone_id="",
+        script_name="codex-otp-main",
+        database_name="codex-otp-db",
+        route_pattern="",
+        email_domain="mail.example.com",
+        service_name="Codex OTP Main",
+    )
+
+    assert result.steps["route"]["status"] == "skipped"
+    assert "未填写 HTTP Route" in result.steps["route"]["message"]
+
+
 def test_provision_codex_otp_blocks_conflicts_by_default(monkeypatch):
     dummy = DummyProvisionerConflicts("acc", "tok", "zone")
     monkeypatch.setattr(
@@ -302,3 +356,25 @@ def test_provision_codex_otp_allows_override_and_reuses_database(monkeypatch):
     assert result.cloudflare["database_id"] == "db-existing"
     assert result.cloudflare["allow_override"] is True
     assert not any(call[0] == "create_d1_database" for call in dummy.calls)
+
+
+def test_provision_codex_otp_reuses_existing_database_after_create_conflict(monkeypatch):
+    dummy = DummyProvisionerCreateConflictThenReuse("acc", "tok", "zone")
+    monkeypatch.setattr(
+        "src.core.codex_otp_provisioner.CloudflareProvisioner",
+        lambda account_id, api_token, zone_id="": dummy,
+    )
+
+    result = provision_codex_otp(
+        account_id="acc",
+        api_token="tok",
+        zone_id="zone",
+        script_name="codex-otp-main",
+        database_name="codex-otp-db",
+        route_pattern="otp.example.com/*",
+        email_domain="mail.example.com",
+        service_name="Codex OTP Main",
+        allow_override=True,
+    )
+
+    assert result.cloudflare["database_id"] == "db-reused"
