@@ -108,3 +108,90 @@ def test_test_cpa_connection_uses_get_and_normalized_url(monkeypatch):
     assert message == "CPA 连接测试成功"
     assert calls[0]["url"] == "https://cpa.example.com/v0/management/auth-files"
     assert calls[0]["kwargs"]["headers"]["Authorization"] == "Bearer token-123"
+
+
+def test_test_cpa_connection_passes_proxy(monkeypatch):
+    calls = []
+
+    def fake_get(url, **kwargs):
+        calls.append({"url": url, "kwargs": kwargs})
+        return FakeResponse(status_code=200, payload={"files": []})
+
+    monkeypatch.setattr(cpa_upload.cffi_requests, "get", fake_get)
+
+    success, message = cpa_upload.test_cpa_connection(
+        "https://cpa.example.com/v0/management",
+        "token-123",
+        "http://127.0.0.1:7890",
+    )
+
+    assert success is True
+    assert message == "CPA 连接测试成功"
+    assert calls[0]["kwargs"]["proxies"] == {
+        "http": "http://127.0.0.1:7890",
+        "https": "http://127.0.0.1:7890",
+    }
+
+
+def test_delete_cpa_auth_file_uses_matching_remote_name(monkeypatch):
+    monkeypatch.setattr(
+        cpa_upload,
+        "list_cpa_auth_files",
+        lambda api_url, api_token, proxy_url=None: (
+            True,
+            {"files": [{"name": "tester@example.com.json"}]},
+            "ok",
+        ),
+    )
+
+    calls = []
+
+    def fake_delete(url, **kwargs):
+        calls.append({"url": url, "kwargs": kwargs})
+        return FakeResponse(status_code=204)
+
+    monkeypatch.setattr(cpa_upload.cffi_requests, "delete", fake_delete)
+
+    success, message = cpa_upload.delete_cpa_auth_file(
+        "https://cpa.example.com",
+        "token-123",
+        "tester@example.com",
+        proxy_url="http://127.0.0.1:7890",
+    )
+
+    assert success is True
+    assert "tester@example.com.json" in message
+    assert calls[0]["url"] == "https://cpa.example.com/v0/management/auth-files?name=tester%40example.com.json"
+    assert calls[0]["kwargs"]["proxies"] == {
+        "http": "http://127.0.0.1:7890",
+        "https": "http://127.0.0.1:7890",
+    }
+
+
+def test_delete_cpa_auth_file_fails_when_remote_name_missing(monkeypatch):
+    monkeypatch.setattr(
+        cpa_upload,
+        "list_cpa_auth_files",
+        lambda api_url, api_token, proxy_url=None: (True, {"files": [{"name": "other@example.com.json"}]}, "ok"),
+    )
+
+    success, message = cpa_upload.delete_cpa_auth_file(
+        "https://cpa.example.com",
+        "token-123",
+        "tester@example.com",
+    )
+
+    assert success is False
+    assert "未在远端 auth-files 中匹配到" in message
+
+
+def test_match_auth_file_name_requires_exact_email_json_match():
+    payload = {
+        "files": [
+            {"name": "tester@example.com.bak.json"},
+            {"name": "other-tester@example.com.json"},
+            {"name": "tester@example.com.json"},
+        ]
+    }
+
+    assert cpa_upload._match_auth_file_name(payload, "tester@example.com") == "tester@example.com.json"

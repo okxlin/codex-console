@@ -19,6 +19,46 @@ from ..timezone_utils import utcnow_naive
 logger = logging.getLogger(__name__)
 
 
+def _build_cpa_proxies(proxy_url: Optional[str]) -> Optional[dict[str, str]]:
+    normalized = str(proxy_url or "").strip()
+    if not normalized:
+        return None
+    return {"http": normalized, "https": normalized}
+
+
+def _extract_auth_file_names(payload: Any) -> list[str]:
+    if isinstance(payload, dict):
+        files = payload.get("files", [])
+    elif isinstance(payload, list):
+        files = payload
+    else:
+        return []
+
+    names: list[str] = []
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        for key in ("name", "filename", "file_name", "path"):
+            value = str(item.get(key) or "").strip()
+            if value:
+                names.append(value)
+                break
+    return names
+
+
+def _match_auth_file_name(payload: Any, email: str) -> Optional[str]:
+    target_email = str(email or "").strip().lower()
+    if not target_email:
+        return None
+
+    expected_name = f"{target_email}.json"
+    for raw_name in _extract_auth_file_names(payload):
+        normalized_name = raw_name.split("/")[-1].strip()
+        if normalized_name.lower() == expected_name:
+            return normalized_name
+    return None
+
+
 def _normalize_cpa_auth_files_url(api_url: str) -> str:
     """将用户填写的 CPA 地址规范化为 auth-files 接口地址。"""
     normalized = (api_url or "").strip().rstrip("/")
@@ -59,7 +99,7 @@ def _extract_cpa_error(response) -> str:
     return error_msg
 
 
-def _post_cpa_auth_file_multipart(upload_url: str, filename: str, file_content: bytes, api_token: str):
+def _post_cpa_auth_file_multipart(upload_url: str, filename: str, file_content: bytes, api_token: str, proxy_url: Optional[str] = None):
     mime = CurlMime()
     mime.addpart(
         name="file",
@@ -72,22 +112,44 @@ def _post_cpa_auth_file_multipart(upload_url: str, filename: str, file_content: 
         upload_url,
         multipart=mime,
         headers=_build_cpa_headers(api_token),
-        proxies=None,
+        proxies=_build_cpa_proxies(proxy_url),
         timeout=30,
         impersonate="chrome110",
     )
 
 
-def _post_cpa_auth_file_raw_json(upload_url: str, filename: str, file_content: bytes, api_token: str):
+def _post_cpa_auth_file_raw_json(upload_url: str, filename: str, file_content: bytes, api_token: str, proxy_url: Optional[str] = None):
     raw_upload_url = f"{upload_url}?name={quote(filename)}"
     return cffi_requests.post(
         raw_upload_url,
         data=file_content,
         headers=_build_cpa_headers(api_token, content_type="application/json"),
-        proxies=None,
+        proxies=_build_cpa_proxies(proxy_url),
         timeout=30,
         impersonate="chrome110",
     )
+
+
+def _delete_cpa_auth_file_by_name(upload_url: str, filename: str, api_token: str, proxy_url: Optional[str] = None):
+    encoded_name = quote(filename)
+    candidates = [
+        f"{upload_url}?name={encoded_name}",
+        f"{upload_url}/{encoded_name}",
+    ]
+    last_response = None
+    proxies = _build_cpa_proxies(proxy_url)
+    for candidate in candidates:
+        response = cffi_requests.delete(
+            candidate,
+            headers=_build_cpa_headers(api_token),
+            proxies=proxies,
+            timeout=15,
+            impersonate="chrome110",
+        )
+        last_response = response
+        if response.status_code in (200, 202, 204, 404):
+            return response
+    return last_response
 
 
 def generate_token_json(account: Account) -> dict:
@@ -119,11 +181,11 @@ def upload_to_cpa(
     api_token: str = None,
 ) -> Tuple[bool, str]:
     """
-    上传单个账号到 CPA 管理平台（不走代理）
+    上传单个账号到 CPA 管理平台
 
     Args:
         token_data: Token JSON 数据
-        proxy: 保留参数，不使用（CPA 上传始终直连）
+        proxy: 可选代理 URL
         api_url: 指定 CPA API URL（优先于全局配置）
         api_token: 指定 CPA API Token（优先于全局配置）
 
@@ -157,6 +219,7 @@ def upload_to_cpa(
             filename,
             file_content,
             effective_token,
+            proxy,
         )
 
         if response.status_code in (200, 201):
@@ -169,6 +232,7 @@ def upload_to_cpa(
                 filename,
                 file_content,
                 effective_token,
+                proxy,
             )
             if fallback_response.status_code in (200, 201):
                 return True, "上传成功"
@@ -262,7 +326,7 @@ def batch_upload_to_cpa(
     return results
 
 
-def list_cpa_auth_files(api_url: str, api_token: str) -> Tuple[bool, Any, str]:
+def list_cpa_auth_files(api_url: str, api_token: str, proxy_url: Optional[str] = None) -> Tuple[bool, Any, str]:
     """列出远端 CPA auth-files 清单。"""
     if not api_url:
         return False, None, "API URL 不能为空"
@@ -277,7 +341,7 @@ def list_cpa_auth_files(api_url: str, api_token: str) -> Tuple[bool, Any, str]:
         response = cffi_requests.get(
             list_url,
             headers=headers,
-            proxies=None,
+            proxies=_build_cpa_proxies(proxy_url),
             timeout=10,
             impersonate="chrome110",
         )
@@ -326,14 +390,46 @@ def count_ready_cpa_auth_files(payload: Any) -> int:
     return ready_count
 
 
+def delete_cpa_auth_file(api_url: str, api_token: str, email: str, proxy_url: Optional[str] = None) -> Tuple[bool, str]:
+    """按邮箱删除远端 CPA auth-files 中对应的认证文件。"""
+    if not api_url:
+        return False, "API URL 不能为空"
+    if not api_token:
+        return False, "API Token 不能为空"
+    if not email:
+        return False, "邮箱不能为空"
+
+    upload_url = _normalize_cpa_auth_files_url(api_url)
+    success, payload, message = list_cpa_auth_files(api_url, api_token, proxy_url=proxy_url)
+    if not success:
+        return False, message
+
+    filename = _match_auth_file_name(payload, email)
+    if not filename:
+        return False, f"未在远端 auth-files 中匹配到 {email} 对应文件"
+
+    try:
+        response = _delete_cpa_auth_file_by_name(upload_url, filename, api_token, proxy_url=proxy_url)
+        if response is None:
+            return False, "删除失败：未收到响应"
+        if response.status_code in (200, 202, 204):
+            return True, f"已删除远端 CPA 文件 {filename}"
+        if response.status_code == 404:
+            return False, f"远端删除接口未找到文件 {filename}"
+        return False, _extract_cpa_error(response)
+    except Exception as e:
+        logger.error("删除 CPA auth-file 异常: %s", e)
+        return False, f"删除 auth-file 失败: {str(e)}"
+
+
 def test_cpa_connection(api_url: str, api_token: str, proxy: str = None) -> Tuple[bool, str]:
     """
-    测试 CPA 连接（不走代理）
+    测试 CPA 连接
 
     Args:
         api_url: CPA API URL
         api_token: CPA API Token
-        proxy: 保留参数，不使用（CPA 始终直连）
+        proxy: 可选代理 URL
 
     Returns:
         (成功标志, 消息)
@@ -348,10 +444,11 @@ def test_cpa_connection(api_url: str, api_token: str, proxy: str = None) -> Tupl
     headers = _build_cpa_headers(api_token)
 
     try:
+        proxies = _build_cpa_proxies(proxy)
         response = cffi_requests.get(
             test_url,
             headers=headers,
-            proxies=None,
+            proxies=proxies,
             timeout=10,
             impersonate="chrome110",
         )

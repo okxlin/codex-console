@@ -73,8 +73,13 @@ const elements = {
     // Outlook 设置
     outlookSettingsForm: document.getElementById('outlook-settings-form'),
     // Web UI 访问控制
-    webuiSettingsForm: document.getElementById('webui-settings-form')
+    webuiSettingsForm: document.getElementById('webui-settings-form'),
+    runMaintenanceNowBtn: document.getElementById('run-maintenance-now-btn'),
+    maintenanceState: document.getElementById('maintenance-state'),
+    maintenanceLogs: document.getElementById('maintenance-logs'),
 };
+
+let maintenanceSocket = null;
 
 // 选中的服务 ID
 let selectedServiceIds = new Set();
@@ -90,6 +95,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadSub2ApiServices();
     loadTmServices();
     initEventListeners();
+    initMaintenanceSocket();
 });
 
 document.addEventListener('click', () => {
@@ -116,6 +122,9 @@ function initEventListeners() {
     // 注册配置表单
     if (elements.registrationForm) {
         elements.registrationForm.addEventListener('submit', handleSaveRegistration);
+    }
+    if (elements.runMaintenanceNowBtn) {
+        elements.runMaintenanceNowBtn.addEventListener('click', handleRunMaintenanceNow);
     }
 
     // 备份数据库
@@ -328,6 +337,7 @@ function initEventListeners() {
 async function loadSettings() {
     try {
         const data = await api.get('/settings');
+        const cpaServices = await api.get('/cpa-services');
 
         // 动态代理设置
         document.getElementById('dynamic-proxy-enabled').checked = data.proxy?.dynamic_enabled || false;
@@ -344,6 +354,22 @@ async function loadSettings() {
         document.getElementById('registration-entry-flow').value = entryFlow;
         document.getElementById('sleep-min').value = data.registration?.sleep_min || 5;
         document.getElementById('sleep-max').value = data.registration?.sleep_max || 30;
+        document.getElementById('maintenance-enabled').value = String(Boolean(data.registration?.maintenance_enabled));
+        document.getElementById('maintenance-schedule-time').value = data.registration?.maintenance_schedule_time || '03:00';
+        document.getElementById('maintenance-validation-proxy').value = data.registration?.maintenance_validation_proxy || '';
+        document.getElementById('maintenance-cleanup-local').value = String(Boolean(data.registration?.maintenance_cleanup_local));
+        document.getElementById('maintenance-cleanup-remote-cpa').value = String(Boolean(data.registration?.maintenance_cleanup_remote_cpa));
+
+        const maintenanceCpaSelect = document.getElementById('maintenance-cpa-service-id');
+        if (maintenanceCpaSelect) {
+            const currentValue = Number(data.registration?.maintenance_cpa_service_id || 0);
+            maintenanceCpaSelect.innerHTML = ['<option value="0">请选择 CPA 服务</option>']
+                .concat((cpaServices || []).map(service => `<option value="${service.id}">${escapeHtml(service.name)} (#${service.id})</option>`))
+                .join('');
+            maintenanceCpaSelect.value = String(currentValue);
+        }
+        renderMaintenanceState(data.registration?.maintenance_state || null);
+        renderPersistedMaintenanceLogs(data.registration?.maintenance_logs || []);
 
         // 验证码等待配置
         if (data.email_code) {
@@ -355,6 +381,12 @@ async function loadSettings() {
         loadOutlookSettings();
 
         // Web UI 访问密码提示
+        const webuiHost = document.getElementById('webui-host');
+        const webuiPort = document.getElementById('webui-port');
+        const webuiDebug = document.getElementById('webui-debug');
+        if (webuiHost) webuiHost.value = data.webui?.host || '127.0.0.1';
+        if (webuiPort) webuiPort.value = data.webui?.port || 3000;
+        if (webuiDebug) webuiDebug.value = String(Boolean(data.webui?.debug));
         if (data.webui?.has_access_password) {
             const input = document.getElementById('webui-access-password');
             if (input) {
@@ -374,14 +406,21 @@ async function handleSaveWebuiSettings(e) {
     e.preventDefault();
 
     const accessPassword = document.getElementById('webui-access-password').value;
+    const host = document.getElementById('webui-host')?.value?.trim() || null;
+    const portValue = document.getElementById('webui-port')?.value;
+    const debugValue = document.getElementById('webui-debug')?.value;
     const payload = {
+        host,
+        port: portValue ? parseInt(portValue, 10) : null,
+        debug: debugValue === 'true',
         access_password: accessPassword || null
     };
 
     try {
-        await api.post('/settings/webui', payload);
-        toast.success('Web UI 设置已更新');
+        const result = await api.post('/settings/webui', payload);
+        toast.success(result?.message || 'Web UI 设置已更新');
         document.getElementById('webui-access-password').value = '';
+        await loadSettings();
     } catch (error) {
         console.error('保存 Web UI 设置失败:', error);
         toast.error('保存 Web UI 设置失败');
@@ -480,6 +519,14 @@ async function loadDatabaseInfo() {
 async function handleSaveRegistration(e) {
     e.preventDefault();
 
+    let registrationState = null;
+    try {
+        registrationState = await api.get('/settings/registration');
+    } catch (error) {
+        toast.error('读取现有注册配置失败: ' + error.message);
+        return;
+    }
+
     const data = {
         max_retries: parseInt(document.getElementById('max-retries').value),
         timeout: parseInt(document.getElementById('timeout').value),
@@ -487,13 +534,117 @@ async function handleSaveRegistration(e) {
         entry_flow: document.getElementById('registration-entry-flow').value || 'native',
         sleep_min: parseInt(document.getElementById('sleep-min').value),
         sleep_max: parseInt(document.getElementById('sleep-max').value),
+        auto_enabled: Boolean(registrationState?.auto_enabled),
+        auto_check_interval: parseInt(registrationState?.auto_check_interval || 60, 10),
+        auto_min_ready_auth_files: parseInt(registrationState?.auto_min_ready_auth_files || 1, 10),
+        auto_email_service_type: registrationState?.auto_email_service_type || 'tempmail',
+        auto_email_service_id: parseInt(registrationState?.auto_email_service_id || 0, 10),
+        auto_proxy: registrationState?.auto_proxy || '',
+        auto_interval_min: parseInt(registrationState?.auto_interval_min || 5, 10),
+        auto_interval_max: parseInt(registrationState?.auto_interval_max || 30, 10),
+        auto_concurrency: parseInt(registrationState?.auto_concurrency || 1, 10),
+        auto_mode: registrationState?.auto_mode || 'pipeline',
+        auto_cpa_service_id: parseInt(registrationState?.auto_cpa_service_id || 0, 10),
+        maintenance_enabled: document.getElementById('maintenance-enabled').value === 'true',
+        maintenance_schedule_time: document.getElementById('maintenance-schedule-time').value || '03:00',
+        maintenance_validation_proxy: document.getElementById('maintenance-validation-proxy').value.trim(),
+        maintenance_cleanup_local: document.getElementById('maintenance-cleanup-local').value === 'true',
+        maintenance_cleanup_remote_cpa: document.getElementById('maintenance-cleanup-remote-cpa').value === 'true',
+        maintenance_cpa_service_id: parseInt(document.getElementById('maintenance-cpa-service-id').value || '0', 10),
     };
 
     try {
         await api.post('/settings/registration', data);
         toast.success('注册配置已保存');
+        await loadSettings();
     } catch (error) {
         toast.error('保存失败: ' + error.message);
+    }
+}
+
+function renderMaintenanceState(state) {
+    if (!elements.maintenanceState) return;
+    if (!state) {
+        elements.maintenanceState.textContent = '未加载';
+        return;
+    }
+    const summary = state.last_summary || {};
+    const parts = [
+        `状态: ${state.status || 'idle'}`,
+        state.schedule_time ? `计划时间: ${state.schedule_time}` : null,
+        state.last_run_at ? `最近执行: ${format.date(state.last_run_at)}` : null,
+        state.next_run_at ? `下次执行: ${format.date(state.next_run_at)}` : null,
+        summary.total_accounts != null ? `最近统计: 总数 ${summary.total_accounts}, 有效 ${summary.valid_count || 0}, 无效 ${summary.invalid_count || 0}, 本地清理 ${summary.local_deleted_count || 0}, 远端清理 ${summary.remote_deleted_count || 0}` : null,
+        state.message || null,
+    ].filter(Boolean);
+    elements.maintenanceState.textContent = parts.join(' | ');
+}
+
+function appendMaintenanceLog(message) {
+    if (!elements.maintenanceLogs) return;
+    const timestamp = new Date().toLocaleString('zh-CN', { hour12: false });
+    const line = `[${timestamp}] ${message}`;
+    const current = elements.maintenanceLogs.value ? elements.maintenanceLogs.value + '\n' : '';
+    elements.maintenanceLogs.value = `${current}${line}`;
+    elements.maintenanceLogs.scrollTop = elements.maintenanceLogs.scrollHeight;
+}
+
+function renderPersistedMaintenanceLogs(lines) {
+    if (!elements.maintenanceLogs) return;
+    if (!Array.isArray(lines) || lines.length === 0) {
+        elements.maintenanceLogs.value = '';
+        return;
+    }
+    elements.maintenanceLogs.value = lines.join('\n');
+    elements.maintenanceLogs.scrollTop = elements.maintenanceLogs.scrollHeight;
+}
+
+function initMaintenanceSocket() {
+    if (!elements.maintenanceLogs) return;
+    if (maintenanceSocket) {
+        try {
+            maintenanceSocket.close();
+        } catch (error) {
+            console.warn('关闭旧维护日志连接失败:', error);
+        }
+    }
+    const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    maintenanceSocket = new WebSocket(`${protocol}//${window.location.host}/api/ws/batch/account-maintenance`);
+    maintenanceSocket.onmessage = (event) => {
+        try {
+            const payload = JSON.parse(event.data);
+            if (payload.type === 'log' && payload.message) {
+                appendMaintenanceLog(payload.message);
+            }
+            if (payload.type === 'status') {
+                loadSettings().catch(error => console.warn('刷新维护状态失败:', error));
+            }
+            if (payload.type === 'ping') {
+                maintenanceSocket.send(JSON.stringify({ type: 'ping' }));
+            }
+        } catch (error) {
+            console.warn('解析维护日志消息失败:', error);
+        }
+    };
+    maintenanceSocket.onclose = () => {
+        window.setTimeout(initMaintenanceSocket, 5000);
+    };
+}
+
+async function handleRunMaintenanceNow() {
+    if (!elements.runMaintenanceNowBtn) return;
+    const originText = elements.runMaintenanceNowBtn.textContent;
+    elements.runMaintenanceNowBtn.disabled = true;
+    elements.runMaintenanceNowBtn.textContent = '执行中...';
+    try {
+        await api.post('/settings/registration/maintenance/run');
+        toast.success('已触发账号自动验证与清理');
+        await loadSettings();
+    } catch (error) {
+        toast.error('触发失败: ' + error.message);
+    } finally {
+        elements.runMaintenanceNowBtn.disabled = false;
+        elements.runMaintenanceNowBtn.textContent = originText;
     }
 }
 

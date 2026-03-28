@@ -14,6 +14,15 @@ from ...core.auto_registration import (
     trigger_auto_registration_check,
     update_auto_registration_state,
 )
+from ...core.account_maintenance import (
+    compute_next_run_at,
+    get_account_maintenance_state,
+    get_persisted_account_maintenance_logs,
+    get_persisted_account_maintenance_state,
+    update_account_maintenance_state,
+    trigger_account_maintenance_reconfigure,
+    trigger_account_maintenance_run,
+)
 from ...database import crud
 from ...database.session import get_db
 from ...services import EmailServiceType
@@ -66,6 +75,12 @@ class RegistrationSettings(BaseModel):
     auto_concurrency: int = 1
     auto_mode: str = "pipeline"
     auto_cpa_service_id: int = 0
+    maintenance_enabled: bool = False
+    maintenance_schedule_time: str = "03:00"
+    maintenance_validation_proxy: Optional[str] = None
+    maintenance_cleanup_local: bool = False
+    maintenance_cleanup_remote_cpa: bool = False
+    maintenance_cpa_service_id: int = 0
 
 
 class WebUISettings(BaseModel):
@@ -125,6 +140,14 @@ async def get_all_settings():
             "auto_concurrency": settings.registration_auto_concurrency,
             "auto_mode": settings.registration_auto_mode,
             "auto_cpa_service_id": settings.registration_auto_cpa_service_id,
+            "maintenance_enabled": settings.account_maintenance_enabled,
+            "maintenance_schedule_time": settings.account_maintenance_schedule_time,
+            "maintenance_validation_proxy": settings.account_maintenance_validation_proxy,
+            "maintenance_cleanup_local": settings.account_maintenance_cleanup_local,
+            "maintenance_cleanup_remote_cpa": settings.account_maintenance_cleanup_remote_cpa,
+            "maintenance_cpa_service_id": settings.account_maintenance_cpa_service_id,
+            "maintenance_state": get_account_maintenance_state() or get_persisted_account_maintenance_state(),
+            "maintenance_logs": get_persisted_account_maintenance_logs(),
         },
         "webui": {
             "host": settings.webui_host,
@@ -266,6 +289,14 @@ async def get_registration_settings():
         "auto_concurrency": settings.registration_auto_concurrency,
         "auto_mode": settings.registration_auto_mode,
         "auto_cpa_service_id": settings.registration_auto_cpa_service_id,
+        "maintenance_enabled": settings.account_maintenance_enabled,
+        "maintenance_schedule_time": settings.account_maintenance_schedule_time,
+        "maintenance_validation_proxy": settings.account_maintenance_validation_proxy,
+        "maintenance_cleanup_local": settings.account_maintenance_cleanup_local,
+        "maintenance_cleanup_remote_cpa": settings.account_maintenance_cleanup_remote_cpa,
+        "maintenance_cpa_service_id": settings.account_maintenance_cpa_service_id,
+        "maintenance_state": get_account_maintenance_state() or get_persisted_account_maintenance_state(),
+        "maintenance_logs": get_persisted_account_maintenance_logs(),
     }
 
 
@@ -314,6 +345,11 @@ async def update_registration_settings(request: RegistrationSettings):
     if request.auto_enabled and request.auto_cpa_service_id <= 0:
         raise HTTPException(status_code=400, detail="启用自动注册时必须选择一个 CPA 服务")
 
+    try:
+        compute_next_run_at(request.maintenance_schedule_time)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
     with get_db() as db:
         if request.auto_enabled:
             cpa_service = crud.get_cpa_service_by_id(db, request.auto_cpa_service_id)
@@ -329,6 +365,13 @@ async def update_registration_settings(request: RegistrationSettings):
             )
             if normalized_service_type != normalized_auto_email_service_type:
                 raise HTTPException(status_code=400, detail="自动注册邮箱服务类型与指定服务不匹配")
+
+        if request.maintenance_cleanup_remote_cpa:
+            if request.maintenance_cpa_service_id <= 0:
+                raise HTTPException(status_code=400, detail="启用远程 CPA 清理时必须选择一个 CPA 服务")
+            maintenance_cpa_service = crud.get_cpa_service_by_id(db, request.maintenance_cpa_service_id)
+            if not maintenance_cpa_service or not maintenance_cpa_service.enabled:
+                raise HTTPException(status_code=400, detail="自动清理选择的 CPA 服务不存在或已禁用")
 
     update_settings(
         registration_max_retries=request.max_retries,
@@ -348,7 +391,22 @@ async def update_registration_settings(request: RegistrationSettings):
         registration_auto_concurrency=request.auto_concurrency,
         registration_auto_mode=request.auto_mode,
         registration_auto_cpa_service_id=max(0, request.auto_cpa_service_id),
+        account_maintenance_enabled=request.maintenance_enabled,
+        account_maintenance_schedule_time=request.maintenance_schedule_time.strip(),
+        account_maintenance_validation_proxy=(request.maintenance_validation_proxy or "").strip(),
+        account_maintenance_cleanup_local=request.maintenance_cleanup_local,
+        account_maintenance_cleanup_remote_cpa=request.maintenance_cleanup_remote_cpa,
+        account_maintenance_cpa_service_id=max(0, request.maintenance_cpa_service_id),
     )
+    if not request.maintenance_enabled:
+        update_account_maintenance_state(
+            enabled=False,
+            status="disabled",
+            message="账号自动维护已禁用",
+            schedule_time=request.maintenance_schedule_time.strip(),
+            next_run_at=None,
+        )
+    trigger_account_maintenance_reconfigure()
 
     if request.auto_enabled:
         update_auto_registration_state(
@@ -371,6 +429,17 @@ async def update_registration_settings(request: RegistrationSettings):
     return {"success": True, "message": "注册设置已更新"}
 
 
+@router.post("/registration/maintenance/run")
+async def run_account_maintenance_now():
+    """立即触发一次账号自动验证与清理。"""
+    settings = get_settings()
+    if not settings.account_maintenance_enabled:
+        raise HTTPException(status_code=400, detail="账号自动维护未启用，请先保存并启用后再执行")
+    if not trigger_account_maintenance_run():
+        raise HTTPException(status_code=503, detail="账号自动维护协调器未就绪，请稍后重试")
+    return {"success": True, "message": "已触发账号自动验证与清理"}
+
+
 @router.post("/webui")
 async def update_webui_settings(request: WebUISettings):
     """更新 Web UI 设置"""
@@ -385,7 +454,11 @@ async def update_webui_settings(request: WebUISettings):
         update_dict["webui_access_password"] = request.access_password
 
     update_settings(**update_dict)
-    return {"success": True, "message": "Web UI 设置已更新"}
+    runtime_changed = any(value is not None for value in (request.host, request.port, request.debug))
+    message = "Web UI 设置已更新"
+    if runtime_changed:
+        message += "，监听地址/端口/调试模式需重启服务后生效"
+    return {"success": True, "message": message, "restart_required": runtime_changed}
 
 
 @router.get("/database")

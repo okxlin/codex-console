@@ -146,11 +146,28 @@
             <div class="tab-content" id="webui-tab">
                 <div class="card">
                     <div class="card-header">
-                        <h3>Web UI 访问密码</h3>
-                        <span class="hint">用于访问页面的密码，留空表示不修改</span>
+                        <h3>Web UI 运行设置</h3>
+                        <span class="hint">管理访问地址、端口、调试模式与访问密码</span>
                     </div>
                     <div class="card-body">
                         <form id="webui-settings-form">
+                            <div class="form-row">
+                                <div class="form-group">
+                                    <label for="webui-host">监听地址</label>
+                                    <input type="text" id="webui-host" name="host" placeholder="例如 127.0.0.1 或 0.0.0.0">
+                                </div>
+                                <div class="form-group">
+                                    <label for="webui-port">监听端口</label>
+                                    <input type="number" id="webui-port" name="port" min="1" max="65535" placeholder="3000">
+                                </div>
+                            </div>
+                            <div class="form-group">
+                                <label for="webui-debug">调试模式</label>
+                                <select id="webui-debug" name="debug">
+                                    <option value="false">关闭</option>
+                                    <option value="true">开启</option>
+                                </select>
+                            </div>
                             <div class="form-group">
                                 <label for="webui-access-password">访问密码</label>
                                 <input type="password" id="webui-access-password" name="access_password" placeholder="留空保持不变" autocomplete="new-password">
@@ -499,6 +516,81 @@
                                 <div class="form-group">
                                     <label for="sleep-max">最大等待时间 (秒)</label>
                                     <input type="number" id="sleep-max" name="sleep_max" value="30" min="5" max="120">
+                                </div>
+                            </div>
+
+                            <div class="card" style="margin-top: var(--spacing-lg); border: 1px solid var(--border-light);">
+                                <div class="card-header">
+                                    <h3>账号自动验证与清理</h3>
+                                    <span class="hint">每天按计划自动验证账号，并按设置清理本地和远程 CPA 中的失效账号</span>
+                                </div>
+                                <div class="card-body">
+                                    <div class="form-row">
+                                        <div class="form-group">
+                                            <label for="maintenance-enabled">启用自动维护</label>
+                                            <select id="maintenance-enabled" name="maintenance_enabled">
+                                                <option value="false">关闭</option>
+                                                <option value="true">开启</option>
+                                            </select>
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="maintenance-schedule-time">计划执行时间</label>
+                                            <input type="time" id="maintenance-schedule-time" name="maintenance_schedule_time" value="03:00">
+                                        </div>
+                                    </div>
+
+                                    <div class="form-row">
+                                        <div class="form-group">
+                                            <label for="maintenance-validation-proxy">验证代理</label>
+                                            <input type="text" id="maintenance-validation-proxy" name="maintenance_validation_proxy" placeholder="例如 http://127.0.0.1:7890，留空走现有策略">
+                                            <span class="hint">仅用于自动验证账号 token，可单独指定代理。</span>
+                                        </div>
+                                    </div>
+
+                                    <div class="form-row">
+                                        <div class="form-group">
+                                            <label for="maintenance-cleanup-local">本地清理</label>
+                                            <select id="maintenance-cleanup-local" name="maintenance_cleanup_local">
+                                                <option value="false">仅标记失效</option>
+                                                <option value="true">验证失败后删除本地账号</option>
+                                            </select>
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="maintenance-cleanup-remote-cpa">远程 CPA 清理</label>
+                                            <select id="maintenance-cleanup-remote-cpa" name="maintenance_cleanup_remote_cpa">
+                                                <option value="false">关闭</option>
+                                                <option value="true">验证失败后删除远端 auth-files</option>
+                                            </select>
+                                        </div>
+                                    </div>
+
+                                    <div class="form-row">
+                                        <div class="form-group">
+                                            <label for="maintenance-cpa-service-id">远程 CPA 服务</label>
+                                            <select id="maintenance-cpa-service-id" name="maintenance_cpa_service_id">
+                                                <option value="0">请选择 CPA 服务</option>
+                                            </select>
+                                            <span class="hint">启用远程清理时必选，将使用该服务及其已配置代理删除远程 auth-files。</span>
+                                        </div>
+                                    </div>
+
+                                    <div class="form-row">
+                                        <div class="form-group" style="flex: 1 1 100%;">
+                                            <label>运行状态</label>
+                                            <div id="maintenance-state" class="hint">未加载</div>
+                                        </div>
+                                    </div>
+
+                                    <div class="form-row">
+                                        <div class="form-group" style="flex: 1 1 100%;">
+                                            <label for="maintenance-logs">实时日志</label>
+                                            <textarea id="maintenance-logs" rows="8" readonly placeholder="这里会实时显示账号自动验证与清理日志"></textarea>
+                                        </div>
+                                    </div>
+
+                                    <div class="form-actions">
+                                        <button type="button" class="btn btn-secondary" id="run-maintenance-now-btn">立即执行一次</button>
+                                    </div>
                                 </div>
                             </div>
 
