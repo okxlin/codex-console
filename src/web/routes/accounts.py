@@ -28,7 +28,14 @@ from ...core.upload.team_manager_upload import upload_to_team_manager, batch_upl
 from ...core.upload.sub2api_upload import batch_upload_to_sub2api, upload_to_sub2api
 
 from ...core.dynamic_proxy import get_proxy_url_for_task
+from ...core.current_account import (
+    CURRENT_ACCOUNT_SETTING_KEY,
+    clear_current_account_selection_if_matches,
+    get_current_account_id as _get_current_account_id,
+    set_current_account_id as _set_current_account_id,
+)
 from ...core.timezone_utils import utcnow_naive
+from ...core.utils import get_data_dir
 from ...database import crud
 from ...database.models import Account
 from ...database.session import get_db
@@ -36,7 +43,6 @@ from ...database.session import get_db
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
-CURRENT_ACCOUNT_SETTING_KEY = "codex.current_account_id"
 OVERVIEW_EXTRA_DATA_KEY = "codex_overview"
 OVERVIEW_CARD_REMOVED_KEY = "codex_overview_card_removed"
 OVERVIEW_CACHE_TTL_SECONDS = 300  # 5 分钟
@@ -395,51 +401,6 @@ def _is_overview_cache_stale(cached_overview: Optional[dict]) -> bool:
     return age > timedelta(seconds=OVERVIEW_CACHE_TTL_SECONDS)
 
 
-def _get_current_account_id(db) -> Optional[int]:
-    setting = crud.get_setting(db, CURRENT_ACCOUNT_SETTING_KEY)
-    if not setting or not setting.value:
-        return None
-    try:
-        return int(setting.value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _set_current_account_id(db, account_id: int):
-    crud.set_setting(
-        db,
-        key=CURRENT_ACCOUNT_SETTING_KEY,
-        value=str(account_id),
-        description="当前切换中的 Codex 账号 ID",
-        category="accounts",
-    )
-
-
-def _clear_current_account_id(db) -> None:
-    setting = crud.get_setting(db, CURRENT_ACCOUNT_SETTING_KEY)
-    if setting:
-        setting.value = ""
-        db.commit()
-
-
-def _remove_current_account_snapshot() -> None:
-    try:
-        snapshot_path = Path("data") / "current_codex_account.json"
-        if snapshot_path.exists():
-            snapshot_path.unlink()
-    except Exception as exc:
-        logger.warning(f"删除 current_codex_account.json 失败: {exc}")
-
-
-def clear_current_account_selection_if_matches(db, account_id: int) -> bool:
-    current_id = _get_current_account_id(db)
-    if current_id != account_id:
-        return False
-    _clear_current_account_id(db)
-    _remove_current_account_snapshot()
-    return True
-
-
 def _is_overview_card_removed(account: Account) -> bool:
     extra_data = account.extra_data if isinstance(account.extra_data, dict) else {}
     return bool(extra_data.get(OVERVIEW_CARD_REMOVED_KEY))
@@ -460,7 +421,7 @@ def _write_current_account_snapshot(account: Account) -> Optional[str]:
     写入当前账号快照文件，便于外部流程读取当前账号令牌。
     """
     try:
-        data_dir = Path("data")
+        data_dir = get_data_dir()
         data_dir.mkdir(parents=True, exist_ok=True)
         output_file = data_dir / "current_codex_account.json"
         payload = {

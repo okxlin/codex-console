@@ -10,11 +10,12 @@ from sqlalchemy import and_, or_, desc, asc, func
 
 from .models import Account, EmailService, RegistrationTask, Setting, Proxy, CpaService, Sub2ApiService, BindCardTask
 from ..core.timezone_utils import utcnow_naive
+from ..core.utils import get_data_dir
 
 
 def _remove_current_account_snapshot_file() -> None:
     try:
-        snapshot_path = Path("data") / "current_codex_account.json"
+        snapshot_path = get_data_dir() / "current_codex_account.json"
         if snapshot_path.exists():
             snapshot_path.unlink()
     except Exception:
