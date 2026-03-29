@@ -41,6 +41,7 @@ class CodexOtpD1MailService(BaseEmailService):
             database_id=self.config["cf_database_id"],
             api_token=self.config["cf_runtime_api_token"],
             timeout=int(self.config.get("timeout") or 30),
+            proxy_url=str(self.config.get("proxy_url") or ""),
         )
 
     def _generate_local_part(self) -> str:

@@ -12,7 +12,7 @@ class CodexOtpD1ReadError(Exception):
 
 
 class CodexOtpD1Reader:
-    def __init__(self, *, account_id: str, database_id: str, api_token: str, timeout: int = 30):
+    def __init__(self, *, account_id: str, database_id: str, api_token: str, timeout: int = 30, proxy_url: str = ""):
         self.account_id = str(account_id or "").strip()
         self.database_id = str(database_id or "").strip()
         self.api_token = str(api_token or "").strip()
@@ -20,10 +20,17 @@ class CodexOtpD1Reader:
         if not self.account_id or not self.database_id or not self.api_token:
             raise CodexOtpD1ReadError("缺少 D1 读取所需配置")
 
-        self.session = cffi_requests.Session(headers={
-            "Authorization": f"Bearer {self.api_token}",
-            "Content-Type": "application/json",
-        })
+        proxy = str(proxy_url or "").strip()
+        session_kwargs: Dict[str, Any] = {
+            "headers": {
+                "Authorization": f"Bearer {self.api_token}",
+                "Content-Type": "application/json",
+            }
+        }
+        if proxy:
+            session_kwargs["proxy"] = proxy
+
+        self.session = cffi_requests.Session(**session_kwargs)
 
     def _query(self, sql: str, params: list[Any]) -> list[Dict[str, Any]]:
         response = self.session.post(

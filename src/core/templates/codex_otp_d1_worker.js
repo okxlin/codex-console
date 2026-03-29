@@ -1,4 +1,4 @@
-// codex-otp-d1-worker template version: 2026-03-29.3
+// codex-otp-d1-worker template version: 2026-03-29.5
 
 function normalizeText(raw) {
   return String(raw || "").replace(/=\r?\n/g, "").replace(/=3D/g, "=");
@@ -100,16 +100,11 @@ export default {
       const subjectMatch = primaryText.match(/Subject:\s*(.*)/i);
       const subject = subjectMatch ? String(subjectMatch[1] || "").trim() : "";
 
-       console.log("[codex-otp-d1] received", {
-        to: toAddress,
-        original_to: originalToAddress,
-        from: String(message.from || ""),
-        subject,
-      });
+      console.log(`[收到邮件] to=${toAddress} original_to=${originalToAddress} from=${String(message.from || "")} subject=${subject}`);
       await logEvent(env, toAddress, "received", subject, `from=${String(message.from || "")};original_to=${originalToAddress}`);
 
       if (!code) {
-        console.log("[codex-otp-d1] no code extracted", { to: toAddress, subject });
+        console.log(`[特殊拦截] 未找到验证码 | 地址: ${toAddress} | 标题: ${subject}`);
         await logEvent(env, toAddress, "code_missing", subject, primaryText.slice(0, 800));
         return;
       }
@@ -123,10 +118,10 @@ export default {
         "email_worker_d1",
         subject
       ).run();
-      console.log("[codex-otp-d1] code stored", { to: toAddress, stage, code, subject });
+      console.log(`[成功] 验证码 ${code} 已写入 D1 -> ${toAddress} | stage=${stage} | 标题: ${subject}`);
       await logEvent(env, toAddress, "code_stored", subject, `stage=${stage};code=${code}`);
     } catch (error) {
-      console.error("[codex-otp-d1] email handler crashed:", error);
+      console.error(`[异常] D1 邮件处理失败: ${error?.message || error}`);
       try {
         const toAddress = String(message?.to || "").trim().toLowerCase();
         await logEvent(env, toAddress || "unknown", "insert_failed", "", String(error?.message || error));
