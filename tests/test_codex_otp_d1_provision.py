@@ -50,3 +50,6 @@ def test_provision_codex_otp_d1_returns_expected_steps(monkeypatch):
     assert result.cloudflare["template_version"] == D1_WORKER_TEMPLATE_VERSION
     assert result.steps["route"]["status"] == "skipped"
     assert "运行期 D1 只读 Token" in " ".join(result.next_steps)
+    execute_calls = [call for call in dummy.calls if call[0] == "execute_sql"]
+    assert execute_calls
+    assert "mail_events" in execute_calls[0][2]

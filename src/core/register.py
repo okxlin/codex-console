@@ -396,6 +396,8 @@ class RegistrationEngine:
             if raw_email and raw_email != normalized_email:
                 self._log(f"邮箱规范化: {raw_email} -> {normalized_email}")
 
+            service_id = self.email_info.get("service_id") if isinstance(self.email_info, dict) else None
+            self._log(f"邮箱绑定完成: inbox={self.inbox_email}, submit={self.email}, service_id={service_id}")
             self._log(f"邮箱已就位，地址新鲜出炉: {self.email}")
             return True
 
