@@ -55,7 +55,7 @@ TEMPLATE_DIR = Path(__file__).with_name("templates")
 WORKER_TEMPLATE = (TEMPLATE_DIR / "codex_otp_worker.js").read_text(encoding="utf-8")
 WORKER_TEMPLATE_VERSION = "2026-03-28.1"
 D1_WORKER_TEMPLATE = (TEMPLATE_DIR / "codex_otp_d1_worker.js").read_text(encoding="utf-8")
-D1_WORKER_TEMPLATE_VERSION = "2026-03-29.1"
+D1_WORKER_TEMPLATE_VERSION = "2026-03-29.4"
 WORKER_COMPATIBILITY_DATE = "2026-03-28"
 
 
@@ -74,6 +74,18 @@ CREATE TABLE IF NOT EXISTS codes (
 
 CREATE INDEX IF NOT EXISTS idx_codes_email_consumed_received
 ON codes(email, consumed, received_at DESC);
+
+CREATE TABLE IF NOT EXISTS mail_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    email TEXT NOT NULL,
+    event_type TEXT NOT NULL,
+    subject TEXT,
+    detail TEXT,
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS idx_mail_events_email_created_at
+ON mail_events(email, created_at DESC);
 """.strip()
 
 

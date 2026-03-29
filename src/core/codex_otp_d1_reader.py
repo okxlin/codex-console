@@ -50,14 +50,27 @@ class CodexOtpD1Reader:
         return rows or []
 
     def get_latest_code(self, *, email: str, stage: str | None = None) -> Optional[Dict[str, Any]]:
+        normalized_email = str(email or "").strip().lower()
         sql = (
             "SELECT id, code, stage, received_at FROM codes "
             "WHERE email = ? AND consumed = 0 "
         )
-        params: list[Any] = [email]
+        params: list[Any] = [normalized_email]
         if stage:
             sql += "AND stage = ? "
             params.append(stage)
         sql += "ORDER BY received_at DESC LIMIT 1"
         rows = self._query(sql, params)
+        if not rows and normalized_email and "@" in normalized_email:
+            local_part, domain = normalized_email.split("@", 1)
+            fallback_sql = (
+                "SELECT id, code, stage, received_at FROM codes "
+                "WHERE lower(trim(email)) = ? AND consumed = 0 "
+            )
+            fallback_params: list[Any] = [f"{local_part}@{domain}".lower()]
+            if stage:
+                fallback_sql += "AND stage = ? "
+                fallback_params.append(stage)
+            fallback_sql += "ORDER BY received_at DESC LIMIT 1"
+            rows = self._query(fallback_sql, fallback_params)
         return rows[0] if rows else None

@@ -16,6 +16,10 @@ from ..core.codex_otp_d1_reader import CodexOtpD1ReadError, CodexOtpD1Reader
 logger = logging.getLogger(__name__)
 
 
+def canonicalize_email(email: str) -> str:
+    return str(email or "").strip().lower()
+
+
 class CodexOtpD1MailService(BaseEmailService):
     def __init__(self, config: Dict[str, Any] = None, name: str = None):
         super().__init__(EmailServiceType.CODEX_OTP_D1, name)
@@ -46,10 +50,11 @@ class CodexOtpD1MailService(BaseEmailService):
 
     def create_email(self, config: Dict[str, Any] = None) -> Dict[str, Any]:
         stage = str((config or {}).get("stage") or "register").strip()
-        domain = str((config or {}).get("domain") or self.config.get("domain") or "").strip().lower()
+        domain = canonicalize_email(f"x@{(config or {}).get('domain') or self.config.get('domain') or ''}").split("@", 1)[1]
         if not domain:
             raise EmailServiceError("缺少邮箱域名")
-        email = f"{self._generate_local_part()}@{domain}"
+        email = canonicalize_email(f"{self._generate_local_part()}@{domain}")
+        logger.info("Codex OTP D1 generated email: %s", email)
         self.update_status(True)
         return {
             "email": email,
@@ -73,11 +78,14 @@ class CodexOtpD1MailService(BaseEmailService):
         if email_id and isinstance(email_id, str) and ":" in email_id:
             _, stage = email_id.split(":", 1)
 
+        normalized_email = canonicalize_email(email)
+        logger.info("Codex OTP D1 polling code for email=%s stage=%s", normalized_email, stage or "register")
+
         start_time = time.time()
         poll_interval = max(1, int(self.config.get("poll_interval") or 3))
         while time.time() - start_time < timeout:
             try:
-                row = self.reader.get_latest_code(email=email, stage=stage)
+                row = self.reader.get_latest_code(email=normalized_email, stage=stage)
             except CodexOtpD1ReadError as exc:
                 self.update_status(False, exc)
                 logger.debug("Codex OTP D1 取码失败: %s", exc)
