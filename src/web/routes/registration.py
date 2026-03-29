@@ -479,6 +479,7 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                             "cf_runtime_api_token": settings.codex_otp_d1_cf_runtime_api_token.get_secret_value() if settings.codex_otp_d1_cf_runtime_api_token else "",
                             "timeout": settings.codex_otp_d1_timeout,
                             "poll_interval": settings.codex_otp_d1_poll_interval,
+                            "proxy_url": actual_proxy_url,
                         }
                     else:
                         raise ValueError("没有可用的 Codex OTP D1 服务，请先在邮箱服务中添加或完成配置")

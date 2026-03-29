@@ -55,7 +55,7 @@ TEMPLATE_DIR = Path(__file__).with_name("templates")
 WORKER_TEMPLATE = (TEMPLATE_DIR / "codex_otp_worker.js").read_text(encoding="utf-8")
 WORKER_TEMPLATE_VERSION = "2026-03-28.1"
 D1_WORKER_TEMPLATE = (TEMPLATE_DIR / "codex_otp_d1_worker.js").read_text(encoding="utf-8")
-D1_WORKER_TEMPLATE_VERSION = "2026-03-29.4"
+D1_WORKER_TEMPLATE_VERSION = "2026-03-29.5"
 WORKER_COMPATIBILITY_DATE = "2026-03-28"
 
 

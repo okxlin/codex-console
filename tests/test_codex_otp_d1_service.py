@@ -36,3 +36,17 @@ def test_codex_otp_d1_reads_latest_code(monkeypatch):
 
     code = service.get_verification_code("abc@mail.example.com", email_id="abc@mail.example.com:register", timeout=2)
     assert code == "654321"
+
+
+def test_codex_otp_d1_reader_receives_proxy_config():
+    service = CodexOtpD1MailService(
+        {
+            "domain": "mail.example.com",
+            "cf_account_id": "acc",
+            "cf_database_id": "db",
+            "cf_runtime_api_token": "token",
+            "proxy_url": "http://127.0.0.1:7890",
+        }
+    )
+
+    assert service.config.get("proxy_url") == "http://127.0.0.1:7890"
