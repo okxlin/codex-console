@@ -530,7 +530,19 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                 update_proxy_usage(db, proxy_id)
 
                 # 保存到数据库
-                engine.save_to_database(result)
+                saved_ok = engine.save_to_database(result)
+                if not saved_ok:
+                    save_error = "注册成功但保存账号到数据库失败"
+                    crud.update_registration_task(
+                        db,
+                        task_uuid,
+                        status="failed",
+                        completed_at=utcnow_naive(),
+                        error_message=save_error,
+                    )
+                    task_manager.update_status(task_uuid, "failed", error=save_error)
+                    logger.error(f"注册任务入库失败: {task_uuid}, 邮箱: {result.email}")
+                    return
 
                 # 自动上传到 CPA（可多服务）
                 if auto_upload_cpa:
