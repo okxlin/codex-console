@@ -457,3 +457,38 @@ def test_fast_refresh_backfill_failure_does_not_break_success(monkeypatch):
 
     assert result.success is True
     assert result.refresh_token == ""
+
+
+def test_abcard_can_backfill_tokens_via_session_token_refresh(monkeypatch):
+    email_service = FakeEmailService([])
+    engine = RegistrationEngine(email_service)
+    engine.registration_entry_flow = "abcard"
+
+    class RefreshResult:
+        success = True
+        access_token = "access-from-session-refresh"
+        refresh_token = "refresh-from-session-refresh"
+        error_message = ""
+
+    class FakeRefreshManager:
+        def __init__(self, proxy_url=None):
+            self.proxy_url = proxy_url
+
+        def refresh_by_session_token(self, session_token):
+            assert session_token == "session-token-1"
+            return RefreshResult()
+
+    monkeypatch.setattr("src.core.register.TokenRefreshManager", FakeRefreshManager)
+
+    result = RegistrationResult(
+        success=False,
+        session_token="session-token-1",
+        access_token="",
+        refresh_token="",
+    )
+
+    refreshed = engine._refresh_tokens_via_session_token(result)
+
+    assert refreshed is True
+    assert result.access_token == "access-from-session-refresh"
+    assert result.refresh_token == "refresh-from-session-refresh"
