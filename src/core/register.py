@@ -14,6 +14,7 @@ import uuid
 from typing import Optional, Dict, Any, Tuple, Callable, List
 from dataclasses import dataclass, field
 from datetime import datetime
+from urllib.parse import urlparse
 
 from curl_cffi import requests as cffi_requests
 
@@ -118,6 +119,14 @@ class SignupFormResult:
     error_message: str = ""
 
 
+@dataclass
+class FlowState:
+    page_type: str = ""
+    method: str = "GET"
+    continue_url: str = ""
+    current_url: str = ""
+
+
 class RegistrationEngine:
     """
     注册引擎
@@ -180,6 +189,9 @@ class RegistrationEngine:
         self._is_existing_account: bool = False  # 是否为已注册账号（用于自动登录）
         self._token_acquisition_requires_login: bool = False  # 新注册账号需要二次登录拿 token
         self._create_account_continue_url: Optional[str] = None  # create_account 返回的 continue_url（ABCard链路兜底）
+        self._create_account_external_url: Optional[str] = None
+        self._create_account_response_url: Optional[str] = None
+        self._create_account_response_data: Dict[str, Any] = {}
         self._create_account_workspace_id: Optional[str] = None
         self._create_account_account_id: Optional[str] = None
         self._create_account_refresh_token: Optional[str] = None
@@ -205,6 +217,39 @@ class RegistrationEngine:
         if origin:
             headers["origin"] = origin
         return headers
+
+    def _extract_flow_state(self, current_url: str, data: Optional[Dict[str, Any]] = None, default_method: str = "GET") -> FlowState:
+        state = FlowState(current_url=str(current_url or ""), method=default_method)
+        payload = data or {}
+        if isinstance(payload, dict):
+            state.page_type = str((payload.get("page") or {}).get("type") or "").strip()
+            state.continue_url = str(
+                payload.get("external_url")
+                or payload.get("externalUrl")
+                or payload.get("continue_url")
+                or payload.get("continueUrl")
+                or ""
+            ).strip()
+
+        if not state.page_type:
+            path = urlparse(state.current_url).path
+            if "create-account/password" in path or "log-in/password" in path:
+                state.page_type = "password"
+            elif "email-verification" in path or "email-otp" in path:
+                state.page_type = "email_otp_verification"
+            elif "about-you" in path:
+                state.page_type = "about_you"
+            elif "sign-in-with-chatgpt" in path or "codex/consent" in path:
+                state.page_type = "codex_consent"
+            elif "add-phone" in path:
+                state.page_type = "add_phone"
+            elif "callback" in path:
+                state.page_type = "callback"
+            elif "chatgpt.com" in state.current_url:
+                state.page_type = "chatgpt_home"
+            elif "signup" in path or "create-account" in path:
+                state.page_type = "signup"
+        return state
 
     @staticmethod
     def _normalize_registration_entry_flow(value: Optional[str]) -> str:
@@ -2125,6 +2170,210 @@ class RegistrationEngine:
             self._log(f"callback 稳定化异常: {e}", "warning")
             return False
 
+    def _run_fast_flow(self, result: RegistrationResult) -> bool:
+        """独立极速流：尽量复刻 v23.4 的最短 API/FSM 成功链。"""
+        self._log("FAST: 启动极速流，优先直达 callback 与 access_token ...")
+
+        did, sen_token = self._prepare_authorize_flow("FAST 首次授权")
+        if not did:
+            result.error_message = "获取 Device ID 失败"
+            return False
+        result.device_id = did
+        if not sen_token:
+            result.error_message = "Sentinel POW 验证失败"
+            return False
+
+        signup_result = self._submit_signup_form(did, sen_token)
+        if not signup_result.success:
+            result.error_message = f"提交注册表单失败: {signup_result.error_message}"
+            return False
+
+        state = self._extract_flow_state(
+            current_url=str(getattr(self.oauth_start, "auth_url", "") or "https://auth.openai.com/create-account/password"),
+            data=signup_result.response_data,
+            default_method="POST",
+        )
+
+        if self._is_existing_account:
+            result.error_message = "FAST 模式仅用于新注册，当前邮箱已存在账号"
+            return False
+
+        for _ in range(8):
+            if state.page_type in {"callback", "chatgpt_home", "oauth_callback"} or ("chatgpt.com" in state.continue_url):
+                break
+
+            if state.page_type in {"create_account_password", "password", "signup"}:
+                password_ok, _ = self._register_password(did, sen_token)
+                if not password_ok:
+                    result.error_message = self._last_register_password_error or "注册密码失败"
+                    return False
+                if not self._send_verification_code():
+                    result.error_message = "发送验证码失败"
+                    return False
+                state = FlowState(page_type="email_otp_verification", current_url="https://auth.openai.com/email-verification", method="GET")
+                continue
+
+            if state.page_type == "email_otp_verification":
+                if not self._verify_email_otp_with_retry(stage_label="FAST 注册验证码", max_attempts=3):
+                    result.error_message = "验证验证码失败"
+                    return False
+                state = self._extract_flow_state(
+                    current_url=str(self._last_validate_otp_continue_url or "https://auth.openai.com/about-you"),
+                    data={"continue_url": self._last_validate_otp_continue_url or ""},
+                    default_method="POST",
+                )
+                continue
+
+            if state.page_type == "about_you":
+                if not self._create_user_account():
+                    result.metadata = {
+                        "create_account_payload": dict(self._last_create_account_payload or {}),
+                        "create_account_error": dict(self._last_create_account_error or {}),
+                    }
+                    result.error_message = "创建用户账户失败"
+                    return False
+                state = self._extract_flow_state(
+                    current_url=str(self._create_account_response_url or self._create_account_external_url or self._create_account_continue_url or ""),
+                    data=dict(self._create_account_response_data or {}),
+                    default_method="POST",
+                )
+                continue
+
+            if state.page_type == "codex_consent":
+                target = state.continue_url or state.current_url
+                self._log(f"FAST: 进入 codex consent，优先沿服务端链路继续 -> {target[:80]}...")
+                try:
+                    r_fwd = self.session.get(
+                        target,
+                        headers=self._build_browser_like_headers(
+                            referer="https://auth.openai.com/about-you",
+                            accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        ),
+                        allow_redirects=True,
+                        timeout=20,
+                    )
+                    next_url = str(getattr(r_fwd, "url", target) or target)
+                    next_data = None
+                    if "application/json" in str((r_fwd.headers or {}).get("content-type") or "").lower():
+                        try:
+                            next_data = r_fwd.json()
+                        except Exception:
+                            next_data = None
+                    state = self._extract_flow_state(next_url, next_data)
+                    continue
+                except Exception as consent_err:
+                    self._log(f"FAST: codex consent 跟随失败: {consent_err}", "warning")
+                    break
+
+            if state.page_type == "add_phone":
+                target = state.continue_url or state.current_url
+                self._log(f"FAST: 命中 add-phone，继续沿服务端链路推进，不立即退回旧兼容链 -> {target[:80]}...")
+                try:
+                    r_fwd = self.session.get(
+                        target,
+                        headers=self._build_browser_like_headers(
+                            referer="https://auth.openai.com/about-you",
+                            accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        ),
+                        allow_redirects=True,
+                        timeout=20,
+                    )
+                    next_url = str(getattr(r_fwd, "url", target) or target)
+                    next_data = None
+                    if "application/json" in str((r_fwd.headers or {}).get("content-type") or "").lower():
+                        try:
+                            next_data = r_fwd.json()
+                        except Exception:
+                            next_data = None
+                    state = self._extract_flow_state(next_url, next_data)
+                    continue
+                except Exception as add_phone_err:
+                    self._log(f"FAST: add-phone 跟随失败: {add_phone_err}", "warning")
+                    break
+
+            if state.continue_url and state.continue_url != state.current_url:
+                self._log(f"FAST: 跟随内部跳转 -> {state.continue_url[:80]}...")
+                try:
+                    r_fwd = self.session.get(
+                        state.continue_url,
+                        headers=self._build_browser_like_headers(
+                            referer=state.current_url or "https://auth.openai.com/",
+                            accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        ),
+                        allow_redirects=True,
+                        timeout=20,
+                    )
+                    next_url = str(getattr(r_fwd, "url", state.continue_url) or state.continue_url)
+                    next_data = None
+                    if "application/json" in str((r_fwd.headers or {}).get("content-type") or "").lower():
+                        try:
+                            next_data = r_fwd.json()
+                        except Exception:
+                            next_data = None
+                    state = self._extract_flow_state(next_url, next_data)
+                    continue
+                except Exception:
+                    pass
+
+            break
+
+        result.password = self.password or ""
+        result.source = "register"
+        result.device_id = result.device_id or str(self.device_id or "")
+        result.account_id = result.account_id or str(self._create_account_account_id or "").strip()
+        result.workspace_id = result.workspace_id or str(self._create_account_workspace_id or "").strip()
+        result.refresh_token = result.refresh_token or str(self._create_account_refresh_token or "").strip()
+
+        external_url = str(self._create_account_external_url or "").strip()
+        if "chatgpt.com" in external_url:
+            self._log("FAST: create_account 返回 ChatGPT external_url，提升为最高优先级收尾入口")
+            if self._stabilize_chatgpt_callback_session(external_url, result):
+                if not result.account_id and result.access_token:
+                    result.account_id = self._extract_account_id_from_access_token(result.access_token)
+                return True
+            try:
+                self.session.get(
+                    external_url,
+                    headers=self._build_browser_like_headers(
+                        referer="https://auth.openai.com/about-you",
+                        accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    ),
+                    allow_redirects=True,
+                    timeout=20,
+                )
+            except Exception:
+                pass
+            self._warmup_chatgpt_session()
+            self._capture_auth_session_tokens(result, access_hint=result.access_token)
+            if result.access_token:
+                if not result.account_id:
+                    result.account_id = self._extract_account_id_from_access_token(result.access_token)
+                self._log("FAST: external_url 回跳后已命中 access_token")
+                return True
+
+        if self._try_reuse_current_registration_session(result):
+            self._log("FAST: 当前会话直取成功")
+            return True
+
+        callback_continue = str(self._last_validate_otp_continue_url or "").strip()
+        if "/api/auth/callback/openai" in callback_continue:
+            self._log("FAST: 捕获到 ChatGPT callback，优先落地 session")
+            if self._stabilize_chatgpt_callback_session(callback_continue, result):
+                if not result.account_id and result.access_token:
+                    result.account_id = self._extract_account_id_from_access_token(result.access_token)
+                return True
+
+        self._warmup_chatgpt_session()
+        self._capture_auth_session_tokens(result, access_hint=result.access_token)
+        if result.access_token:
+            if not result.account_id:
+                result.account_id = self._extract_account_id_from_access_token(result.access_token)
+            self._log("FAST: auth/session 已命中 access_token")
+            return True
+
+        result.error_message = "FAST 模式未获取到 access_token"
+        return False
+
     def _try_browser_side_channel_session_capture(self, result: RegistrationResult) -> bool:
         """最后兜底：使用浏览器上下文侧信道提取 ChatGPT session。"""
         try:
@@ -2513,7 +2762,7 @@ class RegistrationEngine:
                         self._last_register_password_error = (
                             "OpenAI 拒绝当前邮箱用户名（可能已占用或触发风控），建议更换邮箱后重试"
                         )
-                        if did:
+                        if did and self.registration_entry_flow != "fast":
                             self._log("检测到用户名注册失败，尝试登录入口探测邮箱是否已存在...", "warning")
                             try:
                                 probe = self._submit_login_start(did, sen_token)
@@ -2822,10 +3071,16 @@ class RegistrationEngine:
 
             try:
                 data = response.json() or {}
+                self._create_account_response_data = dict(data) if isinstance(data, dict) else {}
+                self._create_account_response_url = str(getattr(response, "url", "") or "").strip()
                 continue_url = str(data.get("continue_url") or "").strip()
                 if continue_url:
                     self._create_account_continue_url = continue_url
                     self._log(f"create_account 返回 continue_url，已缓存: {continue_url[:100]}...")
+                external_url = str(data.get("external_url") or data.get("externalUrl") or "").strip()
+                if external_url:
+                    self._create_account_external_url = external_url
+                    self._log(f"create_account 返回 external_url，已缓存: {external_url[:100]}...")
                 account_id = str(
                     data.get("account_id")
                     or data.get("chatgpt_account_id")
@@ -3182,6 +3437,61 @@ class RegistrationEngine:
 
             result.email = self.email
             self._raise_if_cancelled()
+
+            if effective_entry_flow == "fast":
+                if self._run_fast_flow(result):
+                    effective_scheme_label = "极速流"
+                    result.success = True
+                    client_id = settings.openai_client_id
+                    result.metadata = {
+                        "email_service": self.email_service.service_type.value,
+                        "proxy_used": self.proxy_url,
+                        "registered_at": datetime.now().isoformat(),
+                        "is_existing_account": self._is_existing_account,
+                        "token_acquired_via_relogin": False,
+                        "client_id": client_id,
+                        "device_id": result.device_id,
+                        "has_session_token": bool(result.session_token),
+                        "has_access_token": bool(result.access_token),
+                        "has_refresh_token": bool(result.refresh_token),
+                        "registration_entry_flow": configured_entry_flow,
+                        "registration_scheme_label": self.registration_scheme_label,
+                        "registration_entry_flow_effective": effective_entry_flow,
+                        "registration_scheme_label_effective": effective_scheme_label,
+                        "fingerprint_profile_id": self.fingerprint_profile_id,
+                        "access_token_pending": not bool(result.access_token),
+                        "refresh_token_pending": not bool(result.refresh_token),
+                        "session_token_pending": not bool(result.session_token),
+                    }
+                    export_account = Account(
+                        email=result.email,
+                        password=result.password,
+                        access_token=result.access_token,
+                        refresh_token=result.refresh_token,
+                        id_token=result.id_token,
+                        session_token=result.session_token,
+                        client_id=client_id,
+                        account_id=result.account_id,
+                        workspace_id=result.workspace_id,
+                        email_service=self.email_service.service_type.value,
+                        source=result.source or "register",
+                        subscription_type=None,
+                    )
+                    export_account.id = 0
+                    export_paths = self._write_stage_export_files(export_account)
+                    if export_paths:
+                        result.metadata["export_files"] = export_paths
+                        self._log(f"阶段授权产物已落盘: {json.dumps(export_paths, ensure_ascii=False)}")
+                    return result
+                fast_create_error = dict(self._last_create_account_error or {})
+                result.metadata = {
+                    "create_account_payload": dict(self._last_create_account_payload or {}),
+                    "create_account_error": fast_create_error,
+                    "fast_terminal_failure": str(fast_create_error.get("error_code") or "no_access_token").strip() or "no_access_token",
+                }
+                if not result.error_message:
+                    result.error_message = "FAST 模式未获取到 access_token，终止当前邮箱，不再回退兼容链"
+                return result
 
             # 3. 准备首轮授权流程
             did, sen_token = self._prepare_authorize_flow("首次授权")
