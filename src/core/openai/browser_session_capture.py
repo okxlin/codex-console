@@ -8,7 +8,7 @@ from typing import Any, Dict
 logger = logging.getLogger(__name__)
 
 
-def capture_chatgpt_session_with_playwright(cookies_str: str, session_token: str = "", did: str = "", callback_url: str = "", proxy_url: str = "", timeout_seconds: int = 45) -> Dict[str, Any]:
+def capture_chatgpt_session_with_playwright(cookies_str: str, session_token: str = "", did: str = "", callback_url: str = "", proxy_url: str = "", timeout_seconds: int = 45, fingerprint_profile: Dict[str, Any] | None = None) -> Dict[str, Any]:
     """使用 Playwright 复用现有 cookies，从浏览器上下文侧信道提取 /api/auth/session。"""
     try:
         from playwright.sync_api import sync_playwright
@@ -38,13 +38,16 @@ def capture_chatgpt_session_with_playwright(cookies_str: str, session_token: str
             if proxy:
                 launch_kwargs["proxy"] = {"server": proxy}
             browser = p.chromium.launch(**launch_kwargs)
+            profile = dict(fingerprint_profile or {})
             context = browser.new_context(
-                viewport={"width": 1366, "height": 900},
-                user_agent=(
+                viewport=profile.get("viewport") or {"width": 1366, "height": 900},
+                user_agent=profile.get("user_agent") or (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
                     "Chrome/131.0.0.0 Safari/537.36"
                 ),
+                locale=profile.get("locale") or "en-US",
+                timezone_id=profile.get("timezone_id") or "America/New_York",
             )
             cookies = _build_playwright_cookie_items(cookies_str, session_token, did)
             if cookies:
@@ -60,6 +63,7 @@ def capture_chatgpt_session_with_playwright(cookies_str: str, session_token: str
                 "chatgpt_url": "",
                 "chatgpt_body_hint": "",
                 "page_state": "",
+                "fingerprint_profile_id": str(profile.get("id") or ""),
             }
 
             try:

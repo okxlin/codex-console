@@ -42,6 +42,34 @@ from ..config.settings import get_settings
 logger = logging.getLogger(__name__)
 
 
+FINGERPRINT_PROFILES: List[Dict[str, Any]] = [
+    {
+        "id": "win_chrome_a",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "accept_language": "en-US,en;q=0.9",
+        "viewport": {"width": 1366, "height": 900},
+        "locale": "en-US",
+        "timezone_id": "America/New_York",
+    },
+    {
+        "id": "win_chrome_b",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+        "accept_language": "en-US,en;q=0.8",
+        "viewport": {"width": 1536, "height": 864},
+        "locale": "en-US",
+        "timezone_id": "America/Chicago",
+    },
+    {
+        "id": "mac_chrome_a",
+        "user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "accept_language": "en-US,en;q=0.9",
+        "viewport": {"width": 1440, "height": 900},
+        "locale": "en-US",
+        "timezone_id": "America/Los_Angeles",
+    },
+]
+
+
 @dataclass
 class RegistrationResult:
     """注册结果"""
@@ -118,6 +146,8 @@ class RegistrationEngine:
         self.callback_logger = callback_logger or (lambda msg: logger.info(msg))
         self.task_uuid = task_uuid
         self.cancel_requested = cancel_requested or (lambda: False)
+        self.fingerprint_profile: Dict[str, Any] = dict(secrets.choice(FINGERPRINT_PROFILES))
+        self.fingerprint_profile_id: str = str(self.fingerprint_profile.get("id") or "default")
 
         # 创建 HTTP 客户端
         self.http_client = OpenAIHTTPClient(proxy_url=proxy_url)
@@ -161,6 +191,20 @@ class RegistrationEngine:
         self._last_otp_validation_outcome: str = ""  # success/http_non_200/network_timeout/network_error
         self._last_create_account_payload: Dict[str, Any] = {}
         self._last_create_account_error: Dict[str, Any] = {}
+
+    def _build_browser_like_headers(self, *, referer: str = "", origin: str = "", accept: str = "application/json") -> Dict[str, str]:
+        headers = {
+            "accept": accept,
+            "user-agent": str(self.fingerprint_profile.get("user_agent") or FINGERPRINT_PROFILES[0]["user_agent"]),
+            "accept-language": str(self.fingerprint_profile.get("accept_language") or "en-US,en;q=0.9"),
+            "cache-control": "no-cache",
+            "pragma": "no-cache",
+        }
+        if referer:
+            headers["referer"] = referer
+        if origin:
+            headers["origin"] = origin
+        return headers
 
     @staticmethod
     def _normalize_registration_entry_flow(value: Optional[str]) -> str:
@@ -2113,6 +2157,7 @@ class RegistrationEngine:
                 callback_url=str(self._last_validate_otp_continue_url or ""),
                 proxy_url=str(self.proxy_url or ""),
                 timeout_seconds=45,
+                fingerprint_profile=self.fingerprint_profile,
             )
             if not capture.get("success"):
                 probe = capture.get("probe") or {}
@@ -3279,6 +3324,7 @@ class RegistrationEngine:
                 "registration_scheme_label": self.registration_scheme_label,
                 "registration_entry_flow_effective": effective_entry_flow,
                 "registration_scheme_label_effective": effective_scheme_label,
+                "fingerprint_profile_id": self.fingerprint_profile_id,
                 "access_token_pending": not bool(result.access_token),
                 "refresh_token_pending": not bool(result.refresh_token),
                 # 对齐 K:\1\2：原生入口允许无 session_token 成功，但会标记待补。

@@ -4,6 +4,8 @@ CPA (Codex Protocol API) 上传功能
 
 import json
 import logging
+import base64
+import time
 from typing import List, Dict, Any, Tuple, Optional
 from datetime import datetime
 from urllib.parse import quote
@@ -17,6 +19,40 @@ from ...config.settings import get_settings
 from ..timezone_utils import utcnow_naive
 
 logger = logging.getLogger(__name__)
+
+
+def _extract_account_id_from_access_token(access_token: str) -> str:
+    raw = str(access_token or "").strip()
+    if raw.count(".") < 2:
+        return ""
+    try:
+        payload = raw.split(".")[1]
+        payload += "=" * ((4 - (len(payload) % 4)) % 4)
+        decoded = base64.urlsafe_b64decode(payload.encode("ascii"))
+        claims = json.loads(decoded.decode("utf-8"))
+        auth_claims = claims.get("https://api.openai.com/auth") or {}
+        return str(auth_claims.get("chatgpt_account_id") or claims.get("chatgpt_account_id") or "").strip()
+    except Exception:
+        return ""
+
+
+def _build_mock_id_token(email: str, account_id: str, exp_ts: int) -> str:
+    now_ts = int(time.time())
+    fake_id_payload = {
+        "email": email,
+        "email_verified": True,
+        "https://api.openai.com/auth": {
+            "chatgpt_account_id": account_id,
+            "chatgpt_plan_type": "free",
+        },
+        "exp": exp_ts,
+        "iat": now_ts,
+        "sub": "auth0|mocked_sub_" + (account_id[:8] if account_id else "unknown"),
+    }
+    hdr_b64 = base64.urlsafe_b64encode(b'{"alg":"RS256","typ":"JWT"}').decode("ascii").rstrip("=")
+    pyld_b64 = base64.urlsafe_b64encode(json.dumps(fake_id_payload, separators=(",", ":")).encode("utf-8")).decode("ascii").rstrip("=")
+    fake_sig = base64.urlsafe_b64encode(b'mocked_signature_for_pool_compatibility').decode("ascii").rstrip("=")
+    return f"{hdr_b64}.{pyld_b64}.{fake_sig}"
 
 
 def _build_cpa_proxies(proxy_url: Optional[str]) -> Optional[dict[str, str]]:
@@ -275,15 +311,32 @@ def generate_token_json(account: Account) -> dict:
     Returns:
         CPA 格式的 Token 字典
     """
+    access_token = account.access_token or ""
+    account_id = account.account_id or _extract_account_id_from_access_token(access_token)
+    if not account_id and access_token:
+        account_id = access_token
+
+    exp_ts = int(time.time()) + 2592000
+    if access_token and access_token.count(".") >= 2:
+        try:
+            payload = access_token.split(".")[1]
+            payload += "=" * ((4 - (len(payload) % 4)) % 4)
+            claims = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")).decode("utf-8"))
+            exp_ts = int(claims.get("exp") or exp_ts)
+        except Exception:
+            pass
+
+    id_token = account.id_token or _build_mock_id_token(account.email, account_id, exp_ts)
+
     return {
         "type": "codex",
         "email": account.email,
-        "expired": account.expires_at.strftime("%Y-%m-%dT%H:%M:%S+08:00") if account.expires_at else "",
-        "id_token": account.id_token or "",
-        "account_id": account.account_id or "",
-        "access_token": account.access_token or "",
+        "expired": account.expires_at.strftime("%Y-%m-%dT%H:%M:%S+08:00") if account.expires_at else time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(exp_ts)),
+        "id_token": id_token,
+        "account_id": account_id,
+        "access_token": access_token,
         "last_refresh": account.last_refresh.strftime("%Y-%m-%dT%H:%M:%S+08:00") if account.last_refresh else "",
-        "refresh_token": account.refresh_token or "",
+        "refresh_token": account.refresh_token or account.session_token or "",
     }
 
 
