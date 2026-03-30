@@ -1,5 +1,6 @@
 import json
 import logging
+import os
 import time
 from typing import Any, Dict
 
@@ -26,8 +27,10 @@ def capture_chatgpt_session_with_playwright(cookies_str: str, session_token: str
     binary = _find_chrome_binary() or None
     try:
         with sync_playwright() as p:
+            headed_env = str(os.environ.get("PLAYWRIGHT_HEADED") or "").strip().lower()
+            force_headed = headed_env in {"1", "true", "yes", "on"}
             launch_kwargs = {
-                "headless": False,
+                "headless": not force_headed,
             }
             if binary:
                 launch_kwargs["executable_path"] = binary

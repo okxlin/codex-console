@@ -909,9 +909,12 @@ class RegistrationEngine:
         set_cookie_text = ""
         request_cookie_text = ""
         try:
+            session_referer = str(self._last_validate_otp_continue_url or "").strip()
+            if "/api/auth/callback/openai" not in session_referer:
+                session_referer = "https://chatgpt.com/"
             headers = {
                 "accept": "application/json",
-                "referer": "https://chatgpt.com/",
+                "referer": session_referer,
                 "origin": "https://chatgpt.com",
                 "user-agent": (
                     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -932,8 +935,10 @@ class RegistrationEngine:
             if response.status_code == 200:
                 try:
                     data = response.json() or {}
-                    access_from_json = str(data.get("accessToken") or "").strip()
+                    access_from_json = str(data.get("accessToken") or data.get("access_token") or "").strip()
                     session_from_json = str(data.get("sessionToken") or data.get("session_token") or "").strip()
+                    if not access_from_json:
+                        access_from_json = str(self._find_jwt_in_data(data) or "").strip()
                     if access_from_json:
                         access_token = access_from_json
                     if session_from_json:
@@ -2274,6 +2279,35 @@ class RegistrationEngine:
             return account_id
         except Exception:
             return ""
+
+    def _find_jwt_in_data(self, data: Any, depth: int = 0) -> Optional[str]:
+        """递归扫描 JSON，寻找看起来像 JWT 的 token。"""
+        if depth > 5:
+            return None
+        if isinstance(data, str):
+            parts = data.split(".")
+            if len(parts) == 3 and len(data) > 100:
+                try:
+                    payload = parts[1]
+                    pad = "=" * ((4 - (len(payload) % 4)) % 4)
+                    decoded = base64.urlsafe_b64decode((payload + pad).encode("ascii"))
+                    claims = json.loads(decoded.decode("utf-8"))
+                    if isinstance(claims, dict) and ("exp" in claims or "iat" in claims or "sub" in claims):
+                        return data
+                except Exception:
+                    pass
+            return None
+        if isinstance(data, dict):
+            for value in data.values():
+                found = self._find_jwt_in_data(value, depth + 1)
+                if found:
+                    return found
+        if isinstance(data, list):
+            for item in data:
+                found = self._find_jwt_in_data(item, depth + 1)
+                if found:
+                    return found
+        return None
 
     def _ensure_native_required_tokens(self, result: RegistrationResult) -> bool:
         """
