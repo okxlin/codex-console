@@ -86,6 +86,7 @@ class RegistrationSettings(BaseModel):
     sleep_min: int = 5
     sleep_max: int = 30
     entry_flow: str = "fast"
+    refresh_backfill_enabled: bool = False
     auto_enabled: bool = False
     auto_check_interval: int = 60
     auto_min_ready_auth_files: int = 1
@@ -176,6 +177,7 @@ async def get_all_settings():
             "sleep_min": settings.registration_sleep_min,
             "sleep_max": settings.registration_sleep_max,
             "entry_flow": entry_flow,
+            "refresh_backfill_enabled": settings.registration_refresh_backfill_enabled,
             "entry_flow_label": entry_flow_label,
             "auto_enabled": settings.registration_auto_enabled,
             "auto_check_interval": settings.registration_auto_check_interval,
@@ -343,6 +345,7 @@ async def get_registration_settings():
         "sleep_min": settings.registration_sleep_min,
         "sleep_max": settings.registration_sleep_max,
         "entry_flow": entry_flow,
+        "refresh_backfill_enabled": settings.registration_refresh_backfill_enabled,
         "entry_flow_label": entry_flow_label,
         "auto_enabled": settings.registration_auto_enabled,
         "auto_check_interval": settings.registration_auto_check_interval,
@@ -469,6 +472,7 @@ async def update_registration_settings(request: RegistrationSettings):
         registration_sleep_min=request.sleep_min,
         registration_sleep_max=request.sleep_max,
         registration_entry_flow=flow,
+        registration_refresh_backfill_enabled=request.refresh_backfill_enabled,
         registration_auto_enabled=request.auto_enabled,
         registration_auto_check_interval=request.auto_check_interval,
         registration_auto_min_ready_auth_files=request.auto_min_ready_auth_files,
