@@ -9,12 +9,13 @@ from src.services.base import BaseEmailService
 
 
 class DummyResponse:
-    def __init__(self, status_code=200, payload=None, text="", headers=None, on_return=None):
+    def __init__(self, status_code=200, payload=None, text="", headers=None, on_return=None, url=""):
         self.status_code = status_code
         self._payload = payload
         self.text = text
         self.headers = headers or {}
         self.on_return = on_return
+        self.url = url
 
     def json(self):
         if self._payload is None:
@@ -255,6 +256,7 @@ def test_run_registers_then_relogs_to_fetch_token():
 
     result = engine.run()
 
+    assert result.error_message == "", result.logs
     assert result.success is True
     assert result.source == "register"
     assert result.workspace_id == "ws-1"
@@ -315,3 +317,94 @@ def test_existing_account_login_uses_auto_sent_otp_without_manual_send():
     assert len(email_service.otp_requests) == 1
     assert email_service.otp_requests[0]["otp_sent_at"] is not None
     assert result.metadata["token_acquired_via_relogin"] is False
+
+
+def test_fast_mode_replays_v235_api_registration_chain():
+    session = QueueSession([
+        (
+            "GET",
+            "https://chatgpt.com/",
+            DummyResponse(status_code=200, text="home"),
+        ),
+        (
+            "GET",
+            "https://chatgpt.com/api/auth/csrf",
+            DummyResponse(status_code=200, payload={"csrfToken": "csrf-1"}),
+        ),
+        (
+            "POST",
+            "https://chatgpt.com/api/auth/signin/openai",
+            DummyResponse(status_code=200, payload={"url": "https://auth.example.test/authorize-fast"}),
+        ),
+        (
+            "GET",
+            "https://auth.example.test/authorize-fast",
+            DummyResponse(status_code=200, url="https://auth.openai.com/create-account/password"),
+        ),
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["register"],
+            DummyResponse(status_code=200, payload={}),
+        ),
+        (
+            "GET",
+            OPENAI_API_ENDPOINTS["send_otp"],
+            DummyResponse(status_code=200, payload={}),
+        ),
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["validate_otp"],
+            DummyResponse(
+                status_code=200,
+                payload={"continue_url": "https://auth.openai.com/about-you"},
+                url="https://auth.openai.com/about-you",
+            ),
+        ),
+        (
+            "POST",
+            OPENAI_API_ENDPOINTS["create_account"],
+            DummyResponse(
+                status_code=200,
+                payload={
+                    "external_url": "https://chatgpt.com/api/auth/callback/openai?code=fast-code&state=fast-state",
+                    "account_id": "acct-fast",
+                    "workspace_id": "ws-fast",
+                },
+                url="https://auth.openai.com/about-you",
+            ),
+        ),
+        (
+            "GET",
+            "https://chatgpt.com/api/auth/callback/openai?code=fast-code&state=fast-state",
+            DummyResponse(status_code=200, text="callback-ok"),
+        ),
+        (
+            "GET",
+            "https://chatgpt.com/api/auth/session",
+            DummyResponse(
+                status_code=200,
+                payload={
+                    "accessToken": "access-fast",
+                    "sessionToken": "session-fast",
+                    "refreshToken": "refresh-fast",
+                },
+            ),
+        ),
+    ])
+
+    email_service = FakeEmailService(["135790"])
+    engine = RegistrationEngine(email_service)
+    engine.registration_entry_flow = "fast"
+    engine.http_client = FakeOpenAIClient([session], ["sentinel-fast-1", "sentinel-fast-2"])
+    engine._write_stage_export_files = lambda account: {}
+
+    result = engine.run()
+
+    assert result.success is True, f"error={result.error_message}; logs={result.logs}"
+    assert result.source == "register"
+    assert result.access_token == "access-fast"
+    assert result.session_token == "session-fast"
+    assert result.refresh_token == "refresh-fast"
+    assert result.account_id == "acct-fast"
+    assert result.workspace_id == "ws-fast"
+    assert result.metadata["registration_entry_flow_effective"] == "fast"
