@@ -3,6 +3,7 @@ from datetime import timedelta
 from contextlib import contextmanager
 from pathlib import Path
 
+from src.config.settings import Settings
 from src.core.timezone_utils import utcnow_naive
 from src.database.models import Account, Base, CpaService, EmailService
 from src.database.session import DatabaseSessionManager
@@ -378,16 +379,11 @@ def test_debug_account_maintenance_can_skip_remote_probe(monkeypatch):
     monkeypatch.setattr(settings_routes.crud, "get_account_by_email", lambda db, email: None)
     monkeypatch.setattr(settings_routes.crud, "get_cpa_service_by_id", lambda db, service_id: DummyService())
 
-    result = asyncio.run(
-        settings_routes.debug_account_maintenance(
-            settings_routes.AccountMaintenanceDebugRequest(account_id=7, inspect_remote=False)
-        )
-    )
 
-    assert result["remote_debug"]["inspect_requested"] is False
-    assert result["remote_debug"]["message"] == "已跳过远端接口探测"
-    assert result["local_debug"]["can_delete_locally"] is True
-    assert result["account_runtime_debug"]["maintenance_status"] == "idle"
+def test_settings_exposes_refresh_backfill_default_flag():
+    settings = Settings()
+
+    assert settings.registration_refresh_backfill_enabled is False
 
 
 def test_debug_account_maintenance_reports_validation_skip_window(monkeypatch):

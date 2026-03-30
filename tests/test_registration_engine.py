@@ -1,10 +1,11 @@
 import base64
 import json
+from types import SimpleNamespace
 
 from src.config.constants import EmailServiceType, OPENAI_API_ENDPOINTS, OPENAI_PAGE_TYPES
 from src.core.http_client import OpenAIHTTPClient
 from src.core.openai.oauth import OAuthStart
-from src.core.register import RegistrationEngine
+from src.core.register import RegistrationEngine, RegistrationResult
 from src.services.base import BaseEmailService
 
 
@@ -408,3 +409,51 @@ def test_fast_mode_replays_v235_api_registration_chain():
     assert result.account_id == "acct-fast"
     assert result.workspace_id == "ws-fast"
     assert result.metadata["registration_entry_flow_effective"] == "fast"
+
+
+def test_fast_refresh_backfill_is_optional_and_non_blocking(monkeypatch):
+    email_service = FakeEmailService([])
+    engine = RegistrationEngine(email_service)
+    engine.registration_entry_flow = "fast"
+
+    monkeypatch.setattr(
+        "src.core.register.get_settings",
+        lambda: SimpleNamespace(registration_refresh_backfill_enabled=True),
+    )
+
+    called = {"count": 0}
+
+    def fake_backfill(result):
+        called["count"] += 1
+        result.refresh_token = "refresh-from-backfill"
+        return True
+
+    engine._backfill_refresh_token_via_codex_oauth = fake_backfill
+
+    result = RegistrationResult(success=True, access_token="access-fast", refresh_token="")
+    engine._backfill_refresh_token_if_needed(result)
+
+    assert called["count"] == 1
+    assert result.refresh_token == "refresh-from-backfill"
+
+
+def test_fast_refresh_backfill_failure_does_not_break_success(monkeypatch):
+    email_service = FakeEmailService([])
+    engine = RegistrationEngine(email_service)
+    engine.registration_entry_flow = "fast"
+
+    monkeypatch.setattr(
+        "src.core.register.get_settings",
+        lambda: SimpleNamespace(registration_refresh_backfill_enabled=True),
+    )
+
+    def fake_backfill(result):
+        raise RuntimeError("oauth fallback failed")
+
+    engine._backfill_refresh_token_via_codex_oauth = fake_backfill
+
+    result = RegistrationResult(success=True, access_token="access-fast", refresh_token="")
+    engine._backfill_refresh_token_if_needed(result)
+
+    assert result.success is True
+    assert result.refresh_token == ""

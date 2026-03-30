@@ -3483,6 +3483,66 @@ class RegistrationEngine:
             self._log(f"处理 OAuth 回调失败: {e}", "error")
             return None
 
+    def _backfill_refresh_token_if_needed(self, result: RegistrationResult) -> None:
+        """Fast 成功后的独立补全：尽量复用现有 Cookie 补 refresh_token。"""
+        try:
+            settings = get_settings()
+            if not getattr(settings, "registration_refresh_backfill_enabled", False):
+                return
+            if not result.success:
+                return
+            if self.registration_entry_flow != "fast":
+                return
+            if str(result.refresh_token or "").strip():
+                return
+            if not str(result.access_token or "").strip():
+                return
+
+            self._log("Fast 后处理：尝试复用当前 Cookie 补全 refresh_token ...")
+            if self._backfill_refresh_token_via_codex_oauth(result):
+                self._log("Fast 后处理：refresh_token 补全成功")
+            else:
+                self._log("Fast 后处理：未补到 refresh_token，保留主注册成功结果", "warning")
+        except Exception as e:
+            self._log(f"Fast 后处理：refresh_token 补全异常: {e}", "warning")
+
+    def _backfill_refresh_token_via_codex_oauth(self, result: RegistrationResult) -> bool:
+        """复用现有 ChatGPT/Auth Cookie，走一次轻量 OAuth callback/token 交换。"""
+        had_oauth_start = self.oauth_start
+        try:
+            if not self._start_oauth():
+                return False
+
+            login_ready, callback_or_error = self._restart_login_flow()
+            if not login_ready:
+                self._log(f"refresh_token 补全：OAuth 重登链路失败: {callback_or_error}", "warning")
+                return False
+
+            callback_url = str(callback_or_error or "").strip()
+            if not callback_url:
+                self._log("refresh_token 补全：未拿到 callback_url", "warning")
+                return False
+
+            token_info = self._handle_oauth_callback(callback_url)
+            if not token_info:
+                self._log("refresh_token 补全：OAuth token 交换失败", "warning")
+                return False
+
+            refresh_token = str(token_info.get("refresh_token") or "").strip()
+            if not refresh_token:
+                self._log("refresh_token 补全：token 响应里没有 refresh_token", "warning")
+                return False
+
+            result.refresh_token = refresh_token
+            if not result.id_token:
+                result.id_token = str(token_info.get("id_token") or "").strip()
+            if not result.account_id:
+                result.account_id = str(token_info.get("account_id") or "").strip()
+            return True
+        finally:
+            if had_oauth_start is not None:
+                self.oauth_start = had_oauth_start
+
     def run(self) -> RegistrationResult:
         """
         执行完整的注册流程
@@ -3550,6 +3610,7 @@ class RegistrationEngine:
                 if self._run_fast_flow(result):
                     effective_scheme_label = "极速流"
                     result.success = True
+                    self._backfill_refresh_token_if_needed(result)
                     settings = get_settings()
                     client_id = settings.openai_client_id
                     result.metadata = {
