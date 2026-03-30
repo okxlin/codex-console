@@ -255,7 +255,7 @@ SETTING_DEFINITIONS: Dict[str, SettingDefinition] = {
         db_key="registration.entry_flow",
         default_value="fast",
         category=SettingCategory.REGISTRATION,
-        description="注册入口链路（fast=极速流/默认, auto=按邮箱类型与网络环境自动推荐, native=方案一/原生闭环收尾, abcard=方案二/Session 复用直取；Outlook 邮箱会自动走 Outlook 链路）"
+        description="注册入口链路（fast=极速流/默认, auto=按邮箱类型与网络环境自动推荐, native=方案一/原生闭环收尾, abcard=方案二/Session 复用直取；仅 auto 模式会根据邮箱类型推荐 Outlook 专用链路）"
     ),
     "registration_auto_enabled": SettingDefinition(
         db_key="registration.auto.enabled",

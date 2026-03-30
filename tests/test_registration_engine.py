@@ -143,6 +143,23 @@ class FakeOpenAIClient:
             self._session = self._sessions[self._session_index]
 
 
+def test_explicit_registration_mode_is_not_overridden_by_email_type():
+    email_service = FakeEmailService([])
+    engine = RegistrationEngine(email_service)
+
+    engine.registration_entry_flow = "fast"
+    assert engine._resolve_effective_entry_flow("outlook") == ("fast", "极速流")
+
+    engine.registration_entry_flow = "native"
+    assert engine._resolve_effective_entry_flow("outlook") == ("native", "方案一 / 原生闭环收尾")
+
+    engine.registration_entry_flow = "abcard"
+    assert engine._resolve_effective_entry_flow("outlook") == ("abcard", "方案二 / Session 复用直取")
+
+    engine.registration_entry_flow = "auto"
+    assert engine._resolve_effective_entry_flow("outlook") == ("outlook", "自动推荐 -> Outlook 专用链路")
+
+
 def _workspace_cookie(workspace_id):
     payload = base64.urlsafe_b64encode(
         json.dumps({"workspaces": [{"id": workspace_id}]}).encode("utf-8")
@@ -230,9 +247,11 @@ def test_run_registers_then_relogs_to_fetch_token():
 
     email_service = FakeEmailService(["123456", "654321"])
     engine = RegistrationEngine(email_service)
+    engine.registration_entry_flow = "native"
     fake_oauth = FakeOAuthManager()
-    engine.http_client = FakeOpenAIClient([session_one, session_two], ["sentinel-1", "sentinel-2"])
+    engine.http_client = FakeOpenAIClient([session_one, session_two], ["sentinel-1", "sentinel-2", "sentinel-3"])
     engine.oauth_manager = fake_oauth
+    engine._follow_redirects = lambda url: ("http://localhost:1455/auth/callback?code=code-2&state=state-2", url)
 
     result = engine.run()
 
@@ -281,9 +300,11 @@ def test_existing_account_login_uses_auto_sent_otp_without_manual_send():
 
     email_service = FakeEmailService(["246810"])
     engine = RegistrationEngine(email_service)
+    engine.registration_entry_flow = "native"
     fake_oauth = FakeOAuthManager()
     engine.http_client = FakeOpenAIClient([session], ["sentinel-1"])
     engine.oauth_manager = fake_oauth
+    engine._follow_redirects = lambda url: ("http://localhost:1455/auth/callback?code=code-1&state=state-1", url)
 
     result = engine.run()
 

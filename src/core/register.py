@@ -306,11 +306,9 @@ class RegistrationEngine:
 
     def _resolve_effective_entry_flow(self, service_type_value: str) -> tuple[str, str]:
         configured_flow = self.registration_entry_flow
-        if service_type_value == "outlook":
-            return "outlook", "Outlook 专用链路"
-        if configured_flow == "fast":
-            return "fast", "极速流"
         if configured_flow == "auto":
+            if service_type_value == "outlook":
+                return "outlook", "自动推荐 -> Outlook 专用链路"
             if self._should_prefer_scheme_two(service_type_value):
                 return "abcard", "自动推荐 -> 方案二 / Session 复用直取"
             return "native", "自动推荐 -> 方案一 / 原生闭环收尾"
@@ -997,6 +995,7 @@ class RegistrationEngine:
         这是 ABCard Phase 1 的关键路径。
         """
         access_token = str(access_hint or "").strip()
+        refresh_token = str(result.refresh_token or "").strip()
         set_cookie_text = ""
         request_cookie_text = ""
         try:
@@ -1022,12 +1021,15 @@ class RegistrationEngine:
                     data = response.json() or {}
                     access_from_json = str(data.get("accessToken") or data.get("access_token") or "").strip()
                     session_from_json = str(data.get("sessionToken") or data.get("session_token") or "").strip()
+                    refresh_from_json = str(data.get("refreshToken") or data.get("refresh_token") or "").strip()
                     if not access_from_json:
                         access_from_json = str(self._find_jwt_in_data(data) or "").strip()
                     if access_from_json:
                         access_token = access_from_json
                     if session_from_json:
                         session_token = session_from_json
+                    if refresh_from_json:
+                        refresh_token = refresh_from_json
                 except Exception:
                     pass
             else:
@@ -1107,6 +1109,8 @@ class RegistrationEngine:
             result.session_token = session_token
         if access_token:
             result.access_token = access_token
+        if refresh_token:
+            result.refresh_token = refresh_token
 
         self._log(
             "Auth Session 捕获结果: session_token="
@@ -1115,6 +1119,45 @@ class RegistrationEngine:
             + ("有" if bool(result.access_token) else "无")
         )
         return bool(result.session_token and result.access_token)
+
+    def _finalize_fast_flow_tokens(self, result: RegistrationResult) -> bool:
+        """FAST 收尾优先走 callback/external_url，再直接收 auth/session。"""
+        result.password = self.password or ""
+        result.source = "register"
+        result.device_id = result.device_id or str(self.device_id or "")
+        result.account_id = result.account_id or str(self._create_account_account_id or "").strip()
+        result.workspace_id = result.workspace_id or str(self._create_account_workspace_id or "").strip()
+        result.refresh_token = result.refresh_token or str(self._create_account_refresh_token or "").strip()
+
+        callback_candidates: List[str] = []
+        for candidate in (
+            self._create_account_external_url,
+            self._last_validate_otp_continue_url,
+            self._create_account_continue_url,
+        ):
+            url = str(candidate or "").strip()
+            if not url or "chatgpt.com" not in url:
+                continue
+            if url in callback_candidates:
+                continue
+            callback_candidates.append(url)
+
+        for callback_url in callback_candidates:
+            self._log(f"FAST: 跟随 ChatGPT 回调落地会话 -> {callback_url[:80]}...")
+            if self._stabilize_chatgpt_callback_session(callback_url, result):
+                if not result.account_id and result.access_token:
+                    result.account_id = self._extract_account_id_from_access_token(result.access_token)
+                return True
+
+        self._warmup_chatgpt_session()
+        self._capture_auth_session_tokens(result, access_hint=result.access_token)
+        if result.access_token:
+            if not result.account_id:
+                result.account_id = self._extract_account_id_from_access_token(result.access_token)
+            self._log("FAST: auth/session 已命中 access_token")
+            return True
+
+        return False
 
     def _bootstrap_chatgpt_signin_for_session(self, result: RegistrationResult) -> bool:
         """
@@ -2317,58 +2360,7 @@ class RegistrationEngine:
 
             break
 
-        result.password = self.password or ""
-        result.source = "register"
-        result.device_id = result.device_id or str(self.device_id or "")
-        result.account_id = result.account_id or str(self._create_account_account_id or "").strip()
-        result.workspace_id = result.workspace_id or str(self._create_account_workspace_id or "").strip()
-        result.refresh_token = result.refresh_token or str(self._create_account_refresh_token or "").strip()
-
-        external_url = str(self._create_account_external_url or "").strip()
-        if "chatgpt.com" in external_url:
-            self._log("FAST: create_account 返回 ChatGPT external_url，提升为最高优先级收尾入口")
-            if self._stabilize_chatgpt_callback_session(external_url, result):
-                if not result.account_id and result.access_token:
-                    result.account_id = self._extract_account_id_from_access_token(result.access_token)
-                return True
-            try:
-                self.session.get(
-                    external_url,
-                    headers=self._build_browser_like_headers(
-                        referer="https://auth.openai.com/about-you",
-                        accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    ),
-                    allow_redirects=True,
-                    timeout=20,
-                )
-            except Exception:
-                pass
-            self._warmup_chatgpt_session()
-            self._capture_auth_session_tokens(result, access_hint=result.access_token)
-            if result.access_token:
-                if not result.account_id:
-                    result.account_id = self._extract_account_id_from_access_token(result.access_token)
-                self._log("FAST: external_url 回跳后已命中 access_token")
-                return True
-
-        if self._try_reuse_current_registration_session(result):
-            self._log("FAST: 当前会话直取成功")
-            return True
-
-        callback_continue = str(self._last_validate_otp_continue_url or "").strip()
-        if "/api/auth/callback/openai" in callback_continue:
-            self._log("FAST: 捕获到 ChatGPT callback，优先落地 session")
-            if self._stabilize_chatgpt_callback_session(callback_continue, result):
-                if not result.account_id and result.access_token:
-                    result.account_id = self._extract_account_id_from_access_token(result.access_token)
-                return True
-
-        self._warmup_chatgpt_session()
-        self._capture_auth_session_tokens(result, access_hint=result.access_token)
-        if result.access_token:
-            if not result.account_id:
-                result.account_id = self._extract_account_id_from_access_token(result.access_token)
-            self._log("FAST: auth/session 已命中 access_token")
+        if self._finalize_fast_flow_tokens(result):
             return True
 
         result.error_message = "FAST 模式未获取到 access_token"
@@ -3413,7 +3405,7 @@ class RegistrationEngine:
             service_type_value = str(getattr(service_type_raw, "value", service_type_raw) or "").strip().lower()
             effective_entry_flow, effective_scheme_label = self._resolve_effective_entry_flow(service_type_value)
             native_completion_shortcut = False
-            if effective_entry_flow == "outlook":
+            if configured_entry_flow == "auto" and effective_entry_flow == "outlook":
                 self._log("检测到 Outlook 邮箱，自动使用 Outlook 入口链路（无需在设置中选择）")
             elif configured_entry_flow == "auto":
                 self._log(f"根据邮箱类型与网络环境，自动选择注册方案: {effective_scheme_label}")
