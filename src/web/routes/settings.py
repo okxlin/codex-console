@@ -85,7 +85,7 @@ class RegistrationSettings(BaseModel):
     default_password_length: int = 12
     sleep_min: int = 5
     sleep_max: int = 30
-    entry_flow: str = "auto"
+    entry_flow: str = "fast"
     auto_enabled: bool = False
     auto_check_interval: int = 60
     auto_min_ready_auth_files: int = 1
@@ -139,14 +139,17 @@ async def get_all_settings():
     """获取所有设置"""
     settings = get_settings()
 
-    entry_flow_raw = str(settings.registration_entry_flow or "auto").strip().lower()
-    if entry_flow_raw == "abcard":
+    entry_flow_raw = str(settings.registration_entry_flow or "fast").strip().lower()
+    if entry_flow_raw == "fast":
+        entry_flow = "fast"
+    elif entry_flow_raw == "abcard":
         entry_flow = "abcard"
     elif entry_flow_raw == "native":
         entry_flow = "native"
     else:
         entry_flow = "auto"
     entry_flow_label = {
+        "fast": "极速流",
         "auto": "自动推荐",
         "abcard": "方案二 / Session 复用直取",
         "native": "方案一 / 原生闭环收尾",
@@ -317,14 +320,17 @@ async def get_registration_settings():
     """获取注册设置"""
     settings = get_settings()
 
-    entry_flow_raw = str(settings.registration_entry_flow or "auto").strip().lower()
-    if entry_flow_raw == "abcard":
+    entry_flow_raw = str(settings.registration_entry_flow or "fast").strip().lower()
+    if entry_flow_raw == "fast":
+        entry_flow = "fast"
+    elif entry_flow_raw == "abcard":
         entry_flow = "abcard"
     elif entry_flow_raw == "native":
         entry_flow = "native"
     else:
         entry_flow = "auto"
     entry_flow_label = {
+        "fast": "极速流",
         "auto": "自动推荐",
         "abcard": "方案二 / Session 复用直取",
         "native": "方案一 / 原生闭环收尾",
@@ -379,14 +385,16 @@ async def update_registration_settings(request: RegistrationSettings):
     flow_raw = (request.entry_flow or "native").strip().lower()
     # 兼容 register 基线中的方案别名，以及旧前端历史值。
     flow = "native" if flow_raw == "outlook" else flow_raw
-    if flow in {"auto", "recommended", "default"}:
+    if flow in {"fast", "speed", "rapid", "v23"}:
+        flow = "fast"
+    elif flow in {"auto", "recommended", "default"}:
         flow = "auto"
     if flow in {"scheme1", "plan1", "solution1", "v1", "browser_fsm"}:
         flow = "native"
     elif flow in {"scheme2", "plan2", "solution2", "v2", "session_reuse"}:
         flow = "abcard"
-    if flow not in {"auto", "native", "abcard"}:
-        raise HTTPException(status_code=400, detail="entry_flow 仅支持 auto / native / abcard")
+    if flow not in {"fast", "auto", "native", "abcard"}:
+        raise HTTPException(status_code=400, detail="entry_flow 仅支持 fast / auto / native / abcard")
 
     if request.auto_check_interval < 5 or request.auto_check_interval > 3600:
         raise HTTPException(status_code=400, detail="自动注册检查间隔必须在 5-3600 秒之间")

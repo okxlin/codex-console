@@ -357,8 +357,8 @@ async function loadSettings() {
         document.getElementById('max-retries').value = data.registration?.max_retries || 3;
         document.getElementById('timeout').value = data.registration?.timeout || 120;
         document.getElementById('password-length').value = data.registration?.default_password_length || 12;
-        const entryFlowRaw = String(data.registration?.entry_flow || 'auto').toLowerCase();
-        const entryFlow = entryFlowRaw === 'abcard' ? 'abcard' : (entryFlowRaw === 'native' ? 'native' : 'auto');
+        const entryFlowRaw = String(data.registration?.entry_flow || 'fast').toLowerCase();
+        const entryFlow = entryFlowRaw === 'abcard' ? 'abcard' : (entryFlowRaw === 'native' ? 'native' : (entryFlowRaw === 'auto' ? 'auto' : 'fast'));
         document.getElementById('registration-entry-flow').value = entryFlow;
         document.getElementById('sleep-min').value = data.registration?.sleep_min || 5;
         document.getElementById('sleep-max').value = data.registration?.sleep_max || 30;
@@ -546,7 +546,7 @@ async function handleSaveRegistration(e) {
         max_retries: parseInt(document.getElementById('max-retries').value),
         timeout: parseInt(document.getElementById('timeout').value),
         default_password_length: parseInt(document.getElementById('password-length').value),
-        entry_flow: document.getElementById('registration-entry-flow').value || 'auto',
+        entry_flow: document.getElementById('registration-entry-flow').value || 'fast',
         sleep_min: parseInt(document.getElementById('sleep-min').value),
         sleep_max: parseInt(document.getElementById('sleep-max').value),
         auto_enabled: Boolean(registrationState?.auto_enabled),
