@@ -360,6 +360,7 @@ async function loadSettings() {
         const entryFlowRaw = String(data.registration?.entry_flow || 'fast').toLowerCase();
         const entryFlow = entryFlowRaw === 'abcard' ? 'abcard' : (entryFlowRaw === 'native' ? 'native' : (entryFlowRaw === 'auto' ? 'auto' : 'fast'));
         document.getElementById('registration-entry-flow').value = entryFlow;
+        document.getElementById('refresh-backfill-enabled').value = String(Boolean(data.registration?.refresh_backfill_enabled));
         document.getElementById('sleep-min').value = data.registration?.sleep_min || 5;
         document.getElementById('sleep-max').value = data.registration?.sleep_max || 30;
         if (!maintenanceFormDirty) {
@@ -547,6 +548,7 @@ async function handleSaveRegistration(e) {
         timeout: parseInt(document.getElementById('timeout').value),
         default_password_length: parseInt(document.getElementById('password-length').value),
         entry_flow: document.getElementById('registration-entry-flow').value || 'fast',
+        refresh_backfill_enabled: document.getElementById('refresh-backfill-enabled').value === 'true',
         sleep_min: parseInt(document.getElementById('sleep-min').value),
         sleep_max: parseInt(document.getElementById('sleep-max').value),
         auto_enabled: Boolean(registrationState?.auto_enabled),

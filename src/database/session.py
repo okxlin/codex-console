@@ -166,6 +166,13 @@ def init_database(database_url: str = None) -> DatabaseSessionManager:
         _db_manager.create_tables()
         # 执行数据库迁移
         _db_manager.migrate_tables()
+        # 兜底同步 settings 表缺失项，确保旧库升级后新配置键可持久化。
+        try:
+            from ..config.settings import init_default_settings
+
+            init_default_settings()
+        except Exception as e:
+            logger.warning(f"同步默认设置到数据库时出错: {e}")
     return _db_manager
 
 

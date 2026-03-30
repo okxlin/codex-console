@@ -19,6 +19,7 @@ from urllib.parse import urlparse
 from curl_cffi import requests as cffi_requests
 
 from .openai.oauth import OAuthManager, OAuthStart
+from .openai.token_refresh import TokenRefreshManager
 from .openai.browser_session_capture import capture_chatgpt_session_with_playwright
 from .upload.cpa_upload import generate_token_json
 from .http_client import OpenAIHTTPClient, HTTPClientError
@@ -1677,6 +1678,8 @@ class RegistrationEngine:
             self._bootstrap_chatgpt_signin_for_session(result)
         if not result.session_token:
             result.session_token = self._extract_session_token_from_cookie_text(self._dump_session_cookies())
+        if result.session_token and (not result.access_token or not result.refresh_token):
+            self._refresh_tokens_via_session_token(result)
         if not result.device_id:
             result.device_id = str(self.device_id or self.session.cookies.get("oai-did") or "")
 
@@ -2096,6 +2099,41 @@ class RegistrationEngine:
             self.session_token = fallback_token
             return True
         return False
+
+    def _refresh_tokens_via_session_token(self, result: RegistrationResult) -> bool:
+        """ABCard 兜底：仅凭 next-auth session_token 直接刷新 access/refresh。"""
+        session_token = str(result.session_token or self.session_token or "").strip()
+        if not session_token:
+            session_token = str(self._extract_session_token_from_cookie_text(self._dump_session_cookies()) or "").strip()
+        if not session_token:
+            self._log("session_token 刷新兜底：未找到可用 session_token", "warning")
+            return False
+
+        try:
+            refreshed = TokenRefreshManager(proxy_url=self.proxy_url).refresh_by_session_token(session_token)
+        except Exception as e:
+            self._log(f"session_token 刷新兜底异常: {e}", "warning")
+            return False
+
+        if not refreshed.success:
+            self._log(f"session_token 刷新兜底失败: {refreshed.error_message}", "warning")
+            return False
+
+        result.session_token = session_token
+        self.session_token = session_token
+        if not result.access_token:
+            result.access_token = str(refreshed.access_token or "").strip()
+        if not result.refresh_token:
+            result.refresh_token = str(refreshed.refresh_token or "").strip()
+        if not result.account_id and result.access_token:
+            result.account_id = self._extract_account_id_from_access_token(result.access_token)
+        self._log(
+            "session_token 刷新兜底成功: access_token="
+            + ("有" if bool(result.access_token) else "无")
+            + ", refresh_token="
+            + ("有" if bool(result.refresh_token) else "无")
+        )
+        return bool(result.access_token)
 
     def _attempt_add_phone_session_bridge(self, result: RegistrationResult, workspace_id: str = "") -> bool:
         """命中 add-phone 时，优先尝试会话桥接而不是直接回退 OAuth authorize。"""
