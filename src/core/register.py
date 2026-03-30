@@ -217,6 +217,8 @@ class RegistrationEngine:
         flow = str(value or "auto").strip().lower()
         if flow in {"auto", "recommended", "default"}:
             return "auto"
+        if flow in {"fast", "speed", "rapid", "v23"}:
+            return "fast"
         if flow in {"abcard", "scheme2", "plan2", "solution2", "v2", "session_reuse"}:
             return "abcard"
         if flow == "outlook":
@@ -227,6 +229,8 @@ class RegistrationEngine:
     def _get_registration_scheme_label(flow: str) -> str:
         if flow == "auto":
             return "自动推荐"
+        if flow == "fast":
+            return "极速流"
         if flow == "abcard":
             return "方案二 / Session 复用直取"
         return "方案一 / 原生闭环收尾"
@@ -259,6 +263,8 @@ class RegistrationEngine:
         configured_flow = self.registration_entry_flow
         if service_type_value == "outlook":
             return "outlook", "Outlook 专用链路"
+        if configured_flow == "fast":
+            return "fast", "极速流"
         if configured_flow == "auto":
             if self._should_prefer_scheme_two(service_type_value):
                 return "abcard", "自动推荐 -> 方案二 / Session 复用直取"
