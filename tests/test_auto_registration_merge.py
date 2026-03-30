@@ -1,9 +1,11 @@
 import asyncio
 from contextlib import contextmanager
+from types import SimpleNamespace
 
 from src.config.settings import Settings
 from src.core import auto_registration
 from src.core.auto_registration import AutoRegistrationPlan
+from src.core.register import RegistrationResult
 from src.web.task_manager import task_manager
 from src.web.routes import registration
 
@@ -709,3 +711,89 @@ def test_mark_batch_tasks_cancelled_is_idempotent(monkeypatch):
 
     for task_uuid in task_uuids:
         task_manager.cleanup_task(task_uuid)
+
+
+def test_run_sync_registration_task_marks_failed_when_save_to_database_fails(monkeypatch):
+    task_uuid = "save-failed-task-uuid"
+    updates = []
+    manager_updates = []
+
+    @contextmanager
+    def fake_get_db():
+        class FakeDb:
+            def query(self, *args, **kwargs):
+                class Query:
+                    def filter(self, *filter_args, **filter_kwargs):
+                        return self
+
+                    def filter_by(self, **filter_kwargs):
+                        return self
+
+                    def order_by(self, *order_args, **order_kwargs):
+                        return self
+
+                    def first(self):
+                        return None
+
+                    def all(self):
+                        return []
+
+                return Query()
+
+        yield FakeDb()
+
+    class FakeEngine:
+        def __init__(self, **kwargs):
+            pass
+
+        def run(self):
+            return RegistrationResult(
+                success=True,
+                email="tester@example.com",
+                password="secret",
+                access_token="access-1",
+                session_token="session-1",
+                metadata={"registration_scheme_label_effective": "极速流"},
+            )
+
+        def save_to_database(self, result):
+            return False
+
+    def fake_update_registration_task(db, current_task_uuid, **kwargs):
+        updates.append((current_task_uuid, kwargs))
+        return SimpleNamespace(task_uuid=current_task_uuid, **kwargs)
+
+    def fake_update_proxy_usage(db, proxy_id):
+        return None
+
+    def fake_update_status(current_task_uuid, status, **kwargs):
+        manager_updates.append((current_task_uuid, status, kwargs))
+
+    monkeypatch.setattr(registration, "get_db", fake_get_db)
+    monkeypatch.setattr(registration, "RegistrationEngine", FakeEngine)
+    monkeypatch.setattr(registration, "update_proxy_usage", fake_update_proxy_usage)
+    monkeypatch.setattr(registration.crud, "update_registration_task", fake_update_registration_task)
+    monkeypatch.setattr(registration.task_manager, "update_status", fake_update_status)
+    monkeypatch.setattr(registration, "get_settings", lambda: Settings())
+
+    task_manager.cleanup_task(task_uuid)
+
+    registration._run_sync_registration_task(
+        task_uuid=task_uuid,
+        email_service_type="tempmail",
+        proxy=None,
+        email_service_config={},
+    )
+
+    assert any(kwargs.get("status") == "running" for _, kwargs in updates)
+    assert any(
+        kwargs.get("status") == "failed"
+        and kwargs.get("error_message") == "注册成功但保存账号到数据库失败"
+        for _, kwargs in updates
+    )
+    assert any(
+        status == "failed" and payload.get("error") == "注册成功但保存账号到数据库失败"
+        for _, status, payload in manager_updates
+    )
+
+    task_manager.cleanup_task(task_uuid)
