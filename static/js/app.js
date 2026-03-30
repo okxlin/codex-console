@@ -76,6 +76,7 @@ const elements = {
     taskEmail: document.getElementById('task-email'),
     taskStatus: document.getElementById('task-status'),
     taskService: document.getElementById('task-service'),
+    taskScheme: document.getElementById('task-scheme'),
     taskStatusBadge: document.getElementById('task-status-badge'),
     autoMonitorStatusBadge: document.getElementById('auto-monitor-status-badge'),
     autoMonitorLastChecked: document.getElementById('auto-monitor-last-checked'),
@@ -925,6 +926,9 @@ function connectWebSocket(taskUuid) {
                 if (data.email_service) {
                     elements.taskService.textContent = getServiceTypeText(data.email_service);
                 }
+                if (elements.taskScheme && data.effective_scheme) {
+                    elements.taskScheme.textContent = data.effective_scheme;
+                }
 
                 // 检查是否完成
                 if (['completed', 'failed', 'cancelled', 'cancelling'].includes(data.status)) {
@@ -1157,6 +1161,9 @@ function startLogPolling(taskUuid) {
             if (data.email_service) {
                 elements.taskService.textContent = getServiceTypeText(data.email_service);
             }
+            if (elements.taskScheme && data.effective_scheme) {
+                elements.taskScheme.textContent = data.effective_scheme;
+            }
 
             // 添加新日志
             const logs = data.logs || [];
@@ -1253,6 +1260,9 @@ function showTaskStatus(task) {
     elements.taskId.textContent = task.task_uuid.substring(0, 8) + '...';
     elements.taskEmail.textContent = '-';
     elements.taskService.textContent = '-';
+    if (elements.taskScheme) {
+        elements.taskScheme.textContent = task.effective_scheme || '-';
+    }
     if (elements.taskLastChecked) {
         elements.taskLastChecked.textContent = '-';
     }

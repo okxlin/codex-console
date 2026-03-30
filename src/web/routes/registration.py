@@ -133,6 +133,7 @@ class RegistrationTaskResponse(BaseModel):
     logs: Optional[str] = None
     result: Optional[dict] = None
     error_message: Optional[str] = None
+    effective_scheme: Optional[str] = None
     created_at: Optional[str] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None
@@ -203,6 +204,12 @@ class OutlookBatchRegistrationResponse(BaseModel):
 
 def task_to_response(task: RegistrationTask) -> RegistrationTaskResponse:
     """转换任务模型为响应"""
+    result = task.result if isinstance(task.result, dict) else {}
+    metadata = result.get("metadata") if isinstance(result, dict) else {}
+    effective_scheme = None
+    if isinstance(metadata, dict):
+        effective_scheme = metadata.get("registration_scheme_label_effective") or metadata.get("registration_scheme_label")
+
     return RegistrationTaskResponse(
         id=task.id,
         task_uuid=task.task_uuid,
@@ -212,6 +219,7 @@ def task_to_response(task: RegistrationTask) -> RegistrationTaskResponse:
         logs=task.logs,
         result=task.result,
         error_message=task.error_message,
+        effective_scheme=effective_scheme,
         created_at=task.created_at.isoformat() if task.created_at else None,
         started_at=task.started_at.isoformat() if task.started_at else None,
         completed_at=task.completed_at.isoformat() if task.completed_at else None,
@@ -614,7 +622,10 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                 )
 
                 # 更新 TaskManager 状态
-                task_manager.update_status(task_uuid, "completed", email=result.email)
+                effective_scheme = None
+                if isinstance(result.metadata, dict):
+                    effective_scheme = result.metadata.get("registration_scheme_label_effective") or result.metadata.get("registration_scheme_label")
+                task_manager.update_status(task_uuid, "completed", email=result.email, effective_scheme=effective_scheme)
 
                 logger.info(f"注册任务完成: {task_uuid}, 邮箱: {result.email}")
             else:
@@ -1313,6 +1324,7 @@ async def get_task_logs(task_uuid: str):
 
         logs = task.logs or ""
         result = task.result if isinstance(task.result, dict) else {}
+        metadata = result.get("metadata") if isinstance(result, dict) else {}
         email = result.get("email")
         service_type = task.email_service.service_type if task.email_service else None
         return {
@@ -1320,6 +1332,7 @@ async def get_task_logs(task_uuid: str):
             "status": task.status,
             "email": email,
             "email_service": service_type,
+            "effective_scheme": metadata.get("registration_scheme_label_effective") or metadata.get("registration_scheme_label"),
             "logs": logs.split("\n") if logs else []
         }
 

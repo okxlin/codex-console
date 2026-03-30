@@ -253,9 +253,9 @@ SETTING_DEFINITIONS: Dict[str, SettingDefinition] = {
     ),
     "registration_entry_flow": SettingDefinition(
         db_key="registration.entry_flow",
-        default_value="native",
+        default_value="auto",
         category=SettingCategory.REGISTRATION,
-        description="注册入口链路（native=原本链路, abcard=ABCard入口链路；Outlook 邮箱会自动走 Outlook 链路）"
+        description="注册入口链路（auto=按邮箱类型与网络环境自动推荐, native=方案一/原生闭环收尾, abcard=方案二/Session 复用直取；Outlook 邮箱会自动走 Outlook 链路）"
     ),
     "registration_auto_enabled": SettingDefinition(
         db_key="registration.auto.enabled",
@@ -970,7 +970,7 @@ class Settings(BaseModel):
     registration_default_password_length: int = 12
     registration_sleep_min: int = 5
     registration_sleep_max: int = 30
-    registration_entry_flow: str = "native"
+    registration_entry_flow: str = "auto"
     registration_auto_enabled: bool = False
     registration_auto_check_interval: int = 60
     registration_auto_min_ready_auth_files: int = 1

@@ -500,10 +500,11 @@
                                 <div class="form-group">
                                     <label for="registration-entry-flow">注册入口链路</label>
                                     <select id="registration-entry-flow" name="entry_flow">
-                                        <option value="native">原本注册入口链路（当前默认）</option>
-                                        <option value="abcard">ABCard 入口链路</option>
+                                        <option value="auto">自动推荐：临时邮箱走方案一，域名邮箱/直连更偏方案二</option>
+                                        <option value="native">方案一：原生闭环收尾</option>
+                                        <option value="abcard">方案二：Session 复用直取</option>
                                     </select>
-                                    <span class="hint">切换后将影响后续新建注册任务的入口流程；Outlook 邮箱会自动使用 Outlook 链路，无需手动设置</span>
+                                    <span class="hint">默认建议使用自动推荐：临时邮箱优先方案一，域名邮箱和直连环境优先方案二。方案一对应 `register/register.py` 的稳定闭环思路；方案二对应 `register/any-auto/register_v2.py` 的注册后直接复用会话取 token 思路。Outlook 邮箱会自动使用 Outlook 链路，无需手动设置。</span>
                                 </div>
                             </div>
 

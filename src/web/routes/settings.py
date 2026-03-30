@@ -67,7 +67,7 @@ class RegistrationSettings(BaseModel):
     default_password_length: int = 12
     sleep_min: int = 5
     sleep_max: int = 30
-    entry_flow: str = "native"
+    entry_flow: str = "auto"
     auto_enabled: bool = False
     auto_check_interval: int = 60
     auto_min_ready_auth_files: int = 1
@@ -121,8 +121,18 @@ async def get_all_settings():
     """获取所有设置"""
     settings = get_settings()
 
-    entry_flow_raw = str(settings.registration_entry_flow or "native").strip().lower()
-    entry_flow = "abcard" if entry_flow_raw == "abcard" else "native"
+    entry_flow_raw = str(settings.registration_entry_flow or "auto").strip().lower()
+    if entry_flow_raw == "abcard":
+        entry_flow = "abcard"
+    elif entry_flow_raw == "native":
+        entry_flow = "native"
+    else:
+        entry_flow = "auto"
+    entry_flow_label = {
+        "auto": "自动推荐",
+        "abcard": "方案二 / Session 复用直取",
+        "native": "方案一 / 原生闭环收尾",
+    }[entry_flow]
 
     return {
         "proxy": {
@@ -145,6 +155,7 @@ async def get_all_settings():
             "sleep_min": settings.registration_sleep_min,
             "sleep_max": settings.registration_sleep_max,
             "entry_flow": entry_flow,
+            "entry_flow_label": entry_flow_label,
             "auto_enabled": settings.registration_auto_enabled,
             "auto_check_interval": settings.registration_auto_check_interval,
             "auto_min_ready_auth_files": settings.registration_auto_min_ready_auth_files,
@@ -288,8 +299,18 @@ async def get_registration_settings():
     """获取注册设置"""
     settings = get_settings()
 
-    entry_flow_raw = str(settings.registration_entry_flow or "native").strip().lower()
-    entry_flow = "abcard" if entry_flow_raw == "abcard" else "native"
+    entry_flow_raw = str(settings.registration_entry_flow or "auto").strip().lower()
+    if entry_flow_raw == "abcard":
+        entry_flow = "abcard"
+    elif entry_flow_raw == "native":
+        entry_flow = "native"
+    else:
+        entry_flow = "auto"
+    entry_flow_label = {
+        "auto": "自动推荐",
+        "abcard": "方案二 / Session 复用直取",
+        "native": "方案一 / 原生闭环收尾",
+    }[entry_flow]
 
     return {
         "max_retries": settings.registration_max_retries,
@@ -298,6 +319,7 @@ async def get_registration_settings():
         "sleep_min": settings.registration_sleep_min,
         "sleep_max": settings.registration_sleep_max,
         "entry_flow": entry_flow,
+        "entry_flow_label": entry_flow_label,
         "auto_enabled": settings.registration_auto_enabled,
         "auto_check_interval": settings.registration_auto_check_interval,
         "auto_min_ready_auth_files": settings.registration_auto_min_ready_auth_files,
@@ -337,10 +359,16 @@ async def update_registration_settings(request: RegistrationSettings):
         raise HTTPException(status_code=400, detail="注册等待时间参数无效")
 
     flow_raw = (request.entry_flow or "native").strip().lower()
-    # 兼容旧前端历史值：outlook -> native（Outlook 邮箱会在运行时自动走 outlook 链路）。
+    # 兼容 register 基线中的方案别名，以及旧前端历史值。
     flow = "native" if flow_raw == "outlook" else flow_raw
-    if flow not in {"native", "abcard"}:
-        raise HTTPException(status_code=400, detail="entry_flow 仅支持 native / abcard")
+    if flow in {"auto", "recommended", "default"}:
+        flow = "auto"
+    if flow in {"scheme1", "plan1", "solution1", "v1", "browser_fsm"}:
+        flow = "native"
+    elif flow in {"scheme2", "plan2", "solution2", "v2", "session_reuse"}:
+        flow = "abcard"
+    if flow not in {"auto", "native", "abcard"}:
+        raise HTTPException(status_code=400, detail="entry_flow 仅支持 auto / native / abcard")
 
     if request.auto_check_interval < 5 or request.auto_check_interval > 3600:
         raise HTTPException(status_code=400, detail="自动注册检查间隔必须在 5-3600 秒之间")
