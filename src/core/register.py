@@ -931,14 +931,10 @@ class RegistrationEngine:
         try:
             self.session.get(
                 "https://chatgpt.com/",
-                headers={
-                    "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "referer": "https://auth.openai.com/",
-                    "user-agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                    ),
-                },
+                headers=self._build_browser_like_headers(
+                    referer="https://auth.openai.com/",
+                    accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                ),
                 timeout=20,
             )
         except Exception as e:
@@ -956,17 +952,11 @@ class RegistrationEngine:
             session_referer = str(self._last_validate_otp_continue_url or "").strip()
             if "/api/auth/callback/openai" not in session_referer:
                 session_referer = "https://chatgpt.com/"
-            headers = {
-                "accept": "application/json",
-                "referer": session_referer,
-                "origin": "https://chatgpt.com",
-                "user-agent": (
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                ),
-                "cache-control": "no-cache",
-                "pragma": "no-cache",
-            }
+            headers = self._build_browser_like_headers(
+                referer=session_referer,
+                origin="https://chatgpt.com",
+                accept="application/json",
+            )
             if access_token:
                 headers["authorization"] = f"Bearer {access_token}"
             response = self.session.get(
@@ -1015,16 +1005,12 @@ class RegistrationEngine:
                 retry_response = self.session.get(
                     "https://chatgpt.com/api/auth/session",
                     headers={
-                        "accept": "application/json",
-                        "referer": "https://chatgpt.com/",
-                        "origin": "https://chatgpt.com",
-                        "user-agent": (
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                        **self._build_browser_like_headers(
+                            referer="https://chatgpt.com/",
+                            origin="https://chatgpt.com",
+                            accept="application/json",
                         ),
                         "authorization": f"Bearer {access_token}",
-                        "cache-control": "no-cache",
-                        "pragma": "no-cache",
                     },
                     timeout=20,
                 )
@@ -1091,15 +1077,11 @@ class RegistrationEngine:
         try:
             csrf_resp = self.session.get(
                 "https://chatgpt.com/api/auth/csrf",
-                headers={
-                    "accept": "application/json",
-                    "referer": "https://chatgpt.com/auth/login",
-                    "origin": "https://chatgpt.com",
-                    "user-agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                    ),
-                },
+                headers=self._build_browser_like_headers(
+                    referer="https://chatgpt.com/auth/login",
+                    origin="https://chatgpt.com",
+                    accept="application/json",
+                ),
                 timeout=20,
             )
             if csrf_resp.status_code == 200:
@@ -1117,14 +1099,12 @@ class RegistrationEngine:
             signin_resp = self.session.post(
                 "https://chatgpt.com/api/auth/signin/openai",
                 headers={
-                    "accept": "application/json",
-                    "content-type": "application/x-www-form-urlencoded",
-                    "origin": "https://chatgpt.com",
-                    "referer": "https://chatgpt.com/auth/login",
-                    "user-agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+                    **self._build_browser_like_headers(
+                        referer="https://chatgpt.com/auth/login",
+                        origin="https://chatgpt.com",
+                        accept="application/json",
                     ),
+                    "content-type": "application/x-www-form-urlencoded",
                 },
                 data={
                     "csrfToken": csrf_token,
@@ -1159,14 +1139,10 @@ class RegistrationEngine:
             try:
                 self.session.get(
                     callback_url,
-                    headers={
-                        "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                        "referer": "https://chatgpt.com/auth/login",
-                        "user-agent": (
-                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                        ),
-                    },
+                    headers=self._build_browser_like_headers(
+                        referer="https://chatgpt.com/auth/login",
+                        accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    ),
                     allow_redirects=True,
                     timeout=25,
                 )
@@ -3103,14 +3079,10 @@ class RegistrationEngine:
                 if not current_url.rstrip("/").endswith("chatgpt.com"):
                     self.session.get(
                         "https://chatgpt.com/",
-                        headers={
-                            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                            "referer": current_url,
-                            "user-agent": (
-                                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
-                            ),
-                        },
+                        headers=self._build_browser_like_headers(
+                            referer=current_url,
+                            accept="text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                        ),
                         timeout=20,
                     )
             except Exception as home_err:
