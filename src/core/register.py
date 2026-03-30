@@ -1881,6 +1881,27 @@ class RegistrationEngine:
                 result.device_id = result.device_id or str(self.device_id or "")
                 return True
 
+            if self._recover_abcard_from_auth_context(result):
+                result.password = self.password or ""
+                result.source = "login" if self._is_existing_account else "register"
+                result.device_id = result.device_id or str(self.device_id or "")
+                self._log("深层恢复：已通过会话上下文 + workspace/session 补到可用凭证", "warning")
+                return True
+
+            if self._recover_abcard_via_consent(result, continue_url=continue_url):
+                result.password = self.password or ""
+                result.source = "login" if self._is_existing_account else "register"
+                result.device_id = result.device_id or str(self.device_id or "")
+                self._log("深层恢复：已通过 consent/org 链路补到可用凭证", "warning")
+                return True
+
+            if self._recover_abcard_via_oauth_fallback(result, continue_url=continue_url):
+                result.password = self.password or ""
+                result.source = "login" if self._is_existing_account else "register"
+                result.device_id = result.device_id or str(self.device_id or "")
+                self._log("深层恢复：已通过 OAuth/token 兜底补到可用凭证", "warning")
+                return True
+
             if result.access_token:
                 if not result.account_id:
                     result.account_id = self._extract_account_id_from_access_token(result.access_token)
@@ -1892,15 +1913,18 @@ class RegistrationEngine:
                 self._log("已拿到 access_token，按阶段目标先导出授权文件，不再阻塞于尾流程", "warning")
                 return True
 
-            result.error_message = "跟随重定向链失败"
-            result.metadata = {
+            self._record_abcard_stoploss(result, reason="redirect_follow_failed", continue_url=continue_url)
+            metadata = dict(result.metadata or {})
+            metadata.update({
                 "create_account_payload": dict(self._last_create_account_payload or {}),
                 "create_account_error": dict(self._last_create_account_error or {}),
                 "registration_finish_stage": "redirect_follow",
                 "continue_url_attempted": continue_url,
                 "otp_continue_url": str(self._last_validate_otp_continue_url or ""),
                 "create_account_continue_url": str(self._create_account_continue_url or ""),
-            }
+            })
+            result.metadata = metadata
+            result.error_message = "跟随重定向链失败"
             return False
 
         self._log("处理 OAuth 回调，准备把 token 请出来...")
@@ -1917,6 +1941,29 @@ class RegistrationEngine:
                 result.device_id = result.device_id or str(self.device_id or "")
                 self._log("OAuth 回调处理失败后，已通过 session 侧信道补到可用凭证", "warning")
                 return True
+
+            if self._recover_abcard_from_auth_context(result):
+                result.password = self.password or ""
+                result.source = "login" if self._is_existing_account else "register"
+                result.device_id = result.device_id or str(self.device_id or "")
+                self._log("OAuth 回调失败后，已通过会话上下文深层恢复补到可用凭证", "warning")
+                return True
+
+            if self._recover_abcard_via_consent(result, continue_url=continue_url):
+                result.password = self.password or ""
+                result.source = "login" if self._is_existing_account else "register"
+                result.device_id = result.device_id or str(self.device_id or "")
+                self._log("OAuth 回调失败后，已通过 consent/org 恢复补到可用凭证", "warning")
+                return True
+
+            if self._recover_abcard_via_oauth_fallback(result, continue_url=continue_url):
+                result.password = self.password or ""
+                result.source = "login" if self._is_existing_account else "register"
+                result.device_id = result.device_id or str(self.device_id or "")
+                self._log("OAuth 回调失败后，已通过深层 OAuth 兜底补到可用凭证", "warning")
+                return True
+
+            self._record_abcard_stoploss(result, reason="oauth_callback_failed", continue_url=continue_url)
             result.error_message = "处理 OAuth 回调失败"
             return False
 
@@ -2135,6 +2182,224 @@ class RegistrationEngine:
         )
         return bool(result.access_token)
 
+    def _extract_auth_context_from_cookies(self) -> Dict[str, str]:
+        """从 oai-client-auth-session / auth-info 中尽量提取 workspace/org 上下文。"""
+        context: Dict[str, str] = {}
+
+        def _fill_from_payload(payload: Any) -> None:
+            if not isinstance(payload, dict):
+                return
+            workspace_id = str(
+                payload.get("workspace_id")
+                or payload.get("default_workspace_id")
+                or ((payload.get("workspace") or {}).get("id") if isinstance(payload.get("workspace"), dict) else "")
+                or ""
+            ).strip()
+            organization_id = str(
+                payload.get("organization_id")
+                or payload.get("default_organization_id")
+                or ((payload.get("organization") or {}).get("id") if isinstance(payload.get("organization"), dict) else "")
+                or ""
+            ).strip()
+            if not workspace_id:
+                workspaces = payload.get("workspaces") or []
+                if isinstance(workspaces, list) and workspaces:
+                    workspace_id = str((workspaces[0] or {}).get("id") or "").strip()
+            if not organization_id:
+                orgs = payload.get("organizations") or []
+                if isinstance(orgs, list) and orgs:
+                    organization_id = str((orgs[0] or {}).get("id") or "").strip()
+            if workspace_id and not context.get("workspace_id"):
+                context["workspace_id"] = workspace_id
+            if organization_id and not context.get("organization_id"):
+                context["organization_id"] = organization_id
+
+        try:
+            import base64
+            import json as json_module
+            import urllib.parse as urlparse
+
+            candidates: List[str] = []
+            auth_cookie = str(self.session.cookies.get("oai-client-auth-session") or "").strip()
+            if auth_cookie:
+                segments = auth_cookie.split(".")
+                if len(segments) >= 2 and segments[1]:
+                    candidates.append(segments[1])
+                if segments and segments[0]:
+                    candidates.append(segments[0])
+                candidates.append(auth_cookie)
+
+            auth_info_raw = str(self.session.cookies.get("oai-client-auth-info") or "").strip()
+            if auth_info_raw:
+                auth_info_text = auth_info_raw
+                for _ in range(2):
+                    decoded = urlparse.unquote(auth_info_text)
+                    if decoded == auth_info_text:
+                        break
+                    auth_info_text = decoded
+                candidates.append(auth_info_text)
+
+            for raw in candidates:
+                if not raw:
+                    continue
+                payload = None
+                try:
+                    pad = "=" * ((4 - (len(raw) % 4)) % 4)
+                    decoded = base64.urlsafe_b64decode((raw + pad).encode("ascii"))
+                    payload = json_module.loads(decoded.decode("utf-8"))
+                except Exception:
+                    try:
+                        payload = json_module.loads(raw)
+                    except Exception:
+                        payload = None
+                _fill_from_payload(payload)
+                if context.get("workspace_id") and context.get("organization_id"):
+                    break
+        except Exception as e:
+            self._log(f"解析 auth context cookie 失败: {e}", "warning")
+
+        return context
+
+    def _recover_abcard_from_auth_context(self, result: RegistrationResult) -> bool:
+        """深层恢复：复用 auth cookie 上下文继续 workspace/redirect/auth-session。"""
+        auth_context = self._extract_auth_context_from_cookies()
+        workspace_id = str(result.workspace_id or auth_context.get("workspace_id") or self._create_account_workspace_id or "").strip()
+        organization_id = str(auth_context.get("organization_id") or "").strip()
+        if workspace_id and not result.workspace_id:
+            result.workspace_id = workspace_id
+        if organization_id:
+            self._log(f"会话上下文命中 organization_id: {organization_id}")
+        if not workspace_id:
+            self._record_abcard_stoploss(result, reason="auth_context_missing_workspace")
+            self._log("会话上下文恢复未拿到 workspace_id", "warning")
+            return False
+
+        continue_url = str(self._select_workspace(workspace_id) or "").strip()
+        if not continue_url and organization_id:
+            continue_url = str(self._last_validate_otp_continue_url or self._create_account_continue_url or "").strip()
+            if continue_url:
+                self._log("会话上下文恢复：workspace/select 未命中，改用 org/consent 缓存 continue_url 继续", "warning")
+        if not continue_url:
+            continue_url = str(self._create_account_continue_url or self._last_validate_otp_continue_url or "").strip()
+        if not continue_url:
+            self._record_abcard_stoploss(result, reason="auth_context_missing_continue_url")
+            self._log("会话上下文恢复未拿到 continue_url", "warning")
+            return False
+
+        callback_url, final_url = self._follow_redirects(continue_url)
+        self._log(
+            f"会话上下文恢复重定向结束: callback={'有' if bool(callback_url) else '无'}, final={str(final_url or '')[:100]}..."
+        )
+
+        if callback_url and self._stabilize_chatgpt_callback_session(callback_url, result):
+            if not result.account_id and result.access_token:
+                result.account_id = self._extract_account_id_from_access_token(result.access_token)
+            return True
+
+        self._capture_auth_session_tokens(result, access_hint=result.access_token)
+        if result.access_token:
+            return True
+        if result.session_token:
+            return self._refresh_tokens_via_session_token(result)
+        self._record_abcard_stoploss(result, reason="auth_context_recovery_failed", continue_url=continue_url)
+        return False
+
+    def _recover_abcard_via_oauth_fallback(self, result: RegistrationResult, continue_url: str = "") -> bool:
+        """深层恢复：在 session/callback 都不稳定时，再补一次 OAuth token 兜底。"""
+        target = str(continue_url or self._create_account_continue_url or self._last_validate_otp_continue_url or "").strip()
+        callback_url = ""
+        if target:
+            callback_url, _ = self._follow_redirects(target)
+        if self._refresh_tokens_via_session_token(result):
+            self._log("深层 OAuth 兜底：pre-OTP session refresh 已命中 token", "warning")
+            return True
+        if not callback_url:
+            login_ready, callback_or_error = self._restart_login_flow()
+            if not login_ready:
+                self._record_abcard_stoploss(result, reason="oauth_fallback_restart_login_failed", continue_url=target)
+                self._log(f"深层 OAuth 兜底失败: {callback_or_error}", "warning")
+                return False
+            restart_continue = str(callback_or_error or "").strip()
+            if restart_continue:
+                callback_url, _ = self._follow_redirects(restart_continue)
+            else:
+                callback_url = ""
+        if not callback_url:
+            self._record_abcard_stoploss(result, reason="oauth_fallback_missing_callback", continue_url=target)
+            self._log("深层 OAuth 兜底未拿到 callback_url", "warning")
+            return False
+
+        token_info = self._handle_oauth_callback(callback_url)
+        if not token_info:
+            self._record_abcard_stoploss(result, reason="oauth_fallback_token_exchange_failed", continue_url=callback_url)
+            self._log("深层 OAuth 兜底 token 交换失败", "warning")
+            return False
+
+        result.account_id = str(token_info.get("account_id") or result.account_id or "").strip()
+        result.access_token = str(token_info.get("access_token") or result.access_token or "").strip()
+        result.refresh_token = str(token_info.get("refresh_token") or result.refresh_token or "").strip()
+        result.id_token = str(token_info.get("id_token") or result.id_token or "").strip()
+        if not result.account_id and result.access_token:
+            result.account_id = self._extract_account_id_from_access_token(result.access_token)
+        self._finalize_session_capture(result, strict=False)
+        return bool(result.access_token)
+
+    def _recover_abcard_via_consent(self, result: RegistrationResult, continue_url: str = "") -> bool:
+        """专门恢复链：处理 codex consent / org 中间态，再尝试 callback/session 落地。"""
+        candidates: List[str] = []
+        for candidate in (
+            continue_url,
+            self._last_validate_otp_continue_url,
+            self._create_account_continue_url,
+        ):
+            url = str(candidate or "").strip()
+            if not url or url in candidates:
+                continue
+            if "consent" in url or "callback" in url or "chatgpt.com" in url or "auth.openai.com" in url:
+                candidates.append(url)
+
+        if not candidates:
+            self._record_abcard_stoploss(result, reason="consent_missing_continue_url")
+            return False
+
+        for target in candidates:
+            self._log(f"consent 恢复：沿候选 continue_url 继续 -> {target[:100]}...", "warning")
+            callback_url, final_url = self._follow_redirects(target)
+            state = self._extract_flow_state(str(final_url or target))
+            if state.page_type == "codex_consent":
+                self._log("consent 恢复：仍停留在 consent 页面，继续尝试 session/callback 落地", "warning")
+            if callback_url and self._stabilize_chatgpt_callback_session(callback_url, result):
+                if not result.account_id and result.access_token:
+                    result.account_id = self._extract_account_id_from_access_token(result.access_token)
+                return True
+            self._capture_auth_session_tokens(result, access_hint=result.access_token)
+            if result.access_token:
+                return True
+            if self._refresh_tokens_via_session_token(result):
+                return True
+
+        self._record_abcard_stoploss(result, reason="consent_recovery_failed", continue_url=candidates[0])
+        return False
+
+    def _record_abcard_stoploss(self, result: RegistrationResult, reason: str, continue_url: str = "") -> None:
+        """失败分层记录，便于后续观察 add-phone/consent/workspace 热点。"""
+        metadata = dict(result.metadata or {})
+        stoploss = dict(metadata.get("abcard_stoploss") or {})
+        stoploss.update(
+            {
+                "reason": str(reason or "").strip(),
+                "continue_url": str(continue_url or "").strip(),
+                "workspace_id": str(result.workspace_id or self._create_account_workspace_id or "").strip(),
+                "account_id": str(result.account_id or self._create_account_account_id or "").strip(),
+                "has_auth_cookie": bool(str(self.session.cookies.get("oai-client-auth-session") or "").strip()),
+                "has_session_token": bool(str(result.session_token or self.session_token or "").strip()),
+                "has_access_token": bool(str(result.access_token or "").strip()),
+                "has_refresh_token": bool(str(result.refresh_token or "").strip()),
+            }
+        )
+        metadata["abcard_stoploss"] = stoploss
+        result.metadata = metadata
+
     def _attempt_add_phone_session_bridge(self, result: RegistrationResult, workspace_id: str = "") -> bool:
         """命中 add-phone 时，优先尝试会话桥接而不是直接回退 OAuth authorize。"""
         self._log("检测到 add-phone，优先尝试会话桥接补抓 access/session ...", "warning")
@@ -2159,6 +2424,7 @@ class RegistrationEngine:
             return True
         if workspace_id and not result.workspace_id:
             result.workspace_id = workspace_id
+        self._record_abcard_stoploss(result, reason="add_phone_bridge_failed")
         return False
 
     def _capture_native_core_tokens(self, result: RegistrationResult) -> bool:
@@ -2804,7 +3070,8 @@ class RegistrationEngine:
             return False, f"重新登录提交密码失败: {password_result.error_message}"
         if not password_result.is_existing_account:
             return False, f"重新登录未进入验证码页面: {password_result.page_type or 'unknown'}"
-        return True, ""
+        continue_url = str(self._last_validate_otp_continue_url or self._create_account_continue_url or "").strip()
+        return True, continue_url
 
     def _retrigger_login_otp(self) -> bool:
         """

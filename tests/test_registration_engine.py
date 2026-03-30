@@ -492,3 +492,203 @@ def test_abcard_can_backfill_tokens_via_session_token_refresh(monkeypatch):
     assert refreshed is True
     assert result.access_token == "access-from-session-refresh"
     assert result.refresh_token == "refresh-from-session-refresh"
+
+
+def test_abcard_extracts_auth_context_from_cookies():
+    email_service = FakeEmailService([])
+    engine = RegistrationEngine(email_service)
+
+    auth_info = json.dumps(
+        {
+            "workspace": {"id": "ws-cookie"},
+            "organization": {"id": "org-cookie"},
+        }
+    )
+    engine.session = QueueSession([])
+    engine.session.cookies["oai-client-auth-info"] = auth_info
+
+    context = engine._extract_auth_context_from_cookies()
+
+    assert context["workspace_id"] == "ws-cookie"
+    assert context["organization_id"] == "org-cookie"
+
+
+def test_abcard_stoploss_metadata_is_recorded():
+    email_service = FakeEmailService([])
+    engine = RegistrationEngine(email_service)
+    engine.session = QueueSession([])
+    result = RegistrationResult(success=False, account_id="acct-1", workspace_id="ws-1", metadata={})
+
+    engine._record_abcard_stoploss(result, reason="oauth_callback_failed", continue_url="https://example.test/continue")
+
+    assert result.metadata["abcard_stoploss"]["reason"] == "oauth_callback_failed"
+    assert result.metadata["abcard_stoploss"]["continue_url"] == "https://example.test/continue"
+    assert result.metadata["abcard_stoploss"]["workspace_id"] == "ws-1"
+
+
+def test_abcard_recover_from_auth_context_can_use_session_refresh(monkeypatch):
+    email_service = FakeEmailService([])
+    engine = RegistrationEngine(email_service)
+    engine.session = QueueSession([])
+
+    monkeypatch.setattr(engine, "_extract_auth_context_from_cookies", lambda: {"workspace_id": "ws-ctx", "organization_id": "org-ctx"})
+    monkeypatch.setattr(engine, "_select_workspace", lambda workspace_id: "https://auth.example.test/continue" if workspace_id == "ws-ctx" else "")
+    monkeypatch.setattr(engine, "_follow_redirects", lambda continue_url: (None, continue_url))
+
+    def fake_capture(result, access_hint=None):
+        result.session_token = "session-from-cookie"
+        return False
+
+    monkeypatch.setattr(engine, "_capture_auth_session_tokens", fake_capture)
+    monkeypatch.setattr(engine, "_refresh_tokens_via_session_token", lambda result: setattr(result, "access_token", "access-from-refresh") or True)
+
+    result = RegistrationResult(success=False, access_token="", refresh_token="", session_token="", workspace_id="")
+
+    recovered = engine._recover_abcard_from_auth_context(result)
+
+    assert recovered is True
+    assert result.workspace_id == "ws-ctx"
+    assert result.access_token == "access-from-refresh"
+
+
+def test_abcard_oauth_fallback_prefers_pre_otp_session_refresh(monkeypatch):
+    email_service = FakeEmailService([])
+    engine = RegistrationEngine(email_service)
+
+    called = {"refresh": 0, "restart": 0}
+
+    def fake_refresh(result):
+        called["refresh"] += 1
+        result.access_token = "access-pre-otp"
+        return True
+
+    monkeypatch.setattr(engine, "_follow_redirects", lambda continue_url: (None, continue_url))
+    monkeypatch.setattr(engine, "_refresh_tokens_via_session_token", fake_refresh)
+    monkeypatch.setattr(engine, "_restart_login_flow", lambda: (called.__setitem__("restart", called["restart"] + 1) or True, "http://localhost/callback?code=x&state=y"))
+
+    result = RegistrationResult(success=False, session_token="session-1", access_token="", refresh_token="")
+
+    recovered = engine._recover_abcard_via_oauth_fallback(result, continue_url="https://auth.example.test/continue")
+
+    assert recovered is True
+    assert called["refresh"] == 1
+    assert called["restart"] == 0
+    assert result.access_token == "access-pre-otp"
+
+
+def test_abcard_oauth_fallback_pre_otp_refresh_no_longer_requires_result_session_token(monkeypatch):
+    email_service = FakeEmailService([])
+    engine = RegistrationEngine(email_service)
+
+    called = {"refresh": 0}
+
+    def fake_refresh(result):
+        called["refresh"] += 1
+        result.access_token = "access-from-cookie-refresh"
+        return True
+
+    monkeypatch.setattr(engine, "_follow_redirects", lambda continue_url: (None, continue_url))
+    monkeypatch.setattr(engine, "_refresh_tokens_via_session_token", fake_refresh)
+
+    result = RegistrationResult(success=False, session_token="", access_token="", refresh_token="")
+
+    recovered = engine._recover_abcard_via_oauth_fallback(result, continue_url="https://auth.example.test/continue")
+
+    assert recovered is True
+    assert called["refresh"] == 1
+    assert result.access_token == "access-from-cookie-refresh"
+
+
+def test_abcard_oauth_fallback_uses_restart_continue_url_to_find_callback(monkeypatch):
+    email_service = FakeEmailService([])
+    engine = RegistrationEngine(email_service)
+
+    calls = []
+
+    def fake_follow_redirects(target):
+        calls.append(target)
+        if target == "https://auth.example.test/initial":
+            return None, target
+        if target == "https://auth.example.test/restart-continue":
+            return "http://localhost:1455/auth/callback?code=code-1&state=state-1", target
+        return None, target
+
+    monkeypatch.setattr(engine, "_follow_redirects", fake_follow_redirects)
+    monkeypatch.setattr(engine, "_refresh_tokens_via_session_token", lambda result: False)
+    monkeypatch.setattr(engine, "_restart_login_flow", lambda: (True, "https://auth.example.test/restart-continue"))
+    monkeypatch.setattr(engine, "_handle_oauth_callback", lambda callback_url: {"access_token": "access-oauth", "refresh_token": "refresh-oauth", "account_id": "acct-oauth", "id_token": "id-oauth"})
+    monkeypatch.setattr(engine, "_finalize_session_capture", lambda result, strict=False: True)
+
+    result = RegistrationResult(success=False, access_token="", refresh_token="")
+
+    recovered = engine._recover_abcard_via_oauth_fallback(result, continue_url="https://auth.example.test/initial")
+
+    assert recovered is True
+    assert calls == ["https://auth.example.test/initial", "https://auth.example.test/restart-continue"]
+    assert result.access_token == "access-oauth"
+    assert result.refresh_token == "refresh-oauth"
+
+
+def test_abcard_auth_context_failure_records_stoploss(monkeypatch):
+    email_service = FakeEmailService([])
+    engine = RegistrationEngine(email_service)
+    engine.session = QueueSession([])
+
+    monkeypatch.setattr(engine, "_extract_auth_context_from_cookies", lambda: {})
+    result = RegistrationResult(success=False, metadata={})
+
+    recovered = engine._recover_abcard_from_auth_context(result)
+
+    assert recovered is False
+    assert result.metadata["abcard_stoploss"]["reason"] == "auth_context_missing_workspace"
+
+
+def test_add_phone_bridge_failure_records_stoploss(monkeypatch):
+    email_service = FakeEmailService([])
+    engine = RegistrationEngine(email_service)
+    engine.session = QueueSession([])
+
+    monkeypatch.setattr(engine, "_warmup_chatgpt_session", lambda: None)
+    monkeypatch.setattr(engine, "_capture_auth_session_tokens", lambda result, access_hint=None: False)
+    monkeypatch.setattr(engine, "_bootstrap_chatgpt_signin_for_session", lambda result: False)
+    monkeypatch.setattr(engine, "_ensure_session_token_strict", lambda result, max_rounds=2: False)
+    monkeypatch.setattr(engine, "_try_browser_side_channel_session_capture", lambda result: False)
+
+    result = RegistrationResult(success=False, metadata={})
+
+    recovered = engine._attempt_add_phone_session_bridge(result, workspace_id="ws-add-phone")
+
+    assert recovered is False
+    assert result.metadata["abcard_stoploss"]["reason"] == "add_phone_bridge_failed"
+
+
+def test_abcard_consent_recovery_can_stabilize_callback(monkeypatch):
+    email_service = FakeEmailService([])
+    engine = RegistrationEngine(email_service)
+
+    monkeypatch.setattr(engine, "_follow_redirects", lambda target: ("https://chatgpt.com/api/auth/callback/openai?code=abc&state=xyz", "https://chatgpt.com/"))
+    monkeypatch.setattr(engine, "_stabilize_chatgpt_callback_session", lambda callback_url, result: setattr(result, "access_token", "access-from-consent") or True)
+
+    result = RegistrationResult(success=False, access_token="", refresh_token="", metadata={})
+
+    recovered = engine._recover_abcard_via_consent(result, continue_url="https://auth.openai.com/sign-in-with-chatgpt/codex/consent")
+
+    assert recovered is True
+    assert result.access_token == "access-from-consent"
+
+
+def test_abcard_consent_recovery_failure_records_stoploss(monkeypatch):
+    email_service = FakeEmailService([])
+    engine = RegistrationEngine(email_service)
+    engine.session = QueueSession([])
+
+    monkeypatch.setattr(engine, "_follow_redirects", lambda target: (None, target))
+    monkeypatch.setattr(engine, "_capture_auth_session_tokens", lambda result, access_hint=None: False)
+    monkeypatch.setattr(engine, "_refresh_tokens_via_session_token", lambda result: False)
+
+    result = RegistrationResult(success=False, metadata={})
+
+    recovered = engine._recover_abcard_via_consent(result, continue_url="https://auth.openai.com/sign-in-with-chatgpt/codex/consent")
+
+    assert recovered is False
+    assert result.metadata["abcard_stoploss"]["reason"] == "consent_recovery_failed"
