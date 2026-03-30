@@ -751,6 +751,16 @@ async function handleSaveAutoRegistration() {
         auto_concurrency: autoConcurrency,
         auto_mode: elements.autoRegistrationMode.value,
         auto_cpa_service_id: autoCpaServiceId,
+        maintenance_enabled: !!reg.maintenance_enabled,
+        maintenance_schedule_mode: reg.maintenance_schedule_mode || 'daily',
+        maintenance_schedule_time: reg.maintenance_schedule_time || '03:00',
+        maintenance_schedule_cron: reg.maintenance_schedule_cron || '0 3 * * *',
+        maintenance_validation_proxy: reg.maintenance_validation_proxy || '',
+        maintenance_validation_interval_minutes: reg.maintenance_validation_interval_minutes || 1440,
+        maintenance_debug_enabled: !!reg.maintenance_debug_enabled,
+        maintenance_cleanup_local: !!reg.maintenance_cleanup_local,
+        maintenance_cleanup_remote_cpa: !!reg.maintenance_cleanup_remote_cpa,
+        maintenance_cpa_service_id: reg.maintenance_cpa_service_id || 0,
     };
 
     await api.post('/settings/registration', payload);
@@ -758,6 +768,8 @@ async function handleSaveAutoRegistration() {
 
     if (elements.autoRegistrationEnabled.checked) {
         sessionStorage.setItem('activeTask', JSON.stringify({ mode: 'auto' }));
+        currentTask = null;
+        activeTaskUuid = null;
         autoMonitorLastLogIndex = 0;
         displayedLogs.clear();
         elements.consoleLog.innerHTML = '';
@@ -765,6 +777,16 @@ async function handleSaveAutoRegistration() {
         startAutoRegistrationMonitor();
     } else {
         stopAutoRegistrationMonitor();
+        disconnectBatchWebSocket();
+        stopBatchPolling();
+        currentBatch = null;
+        activeBatchId = null;
+        batchCompleted = true;
+        batchFinalStatus = 'cancelled';
+        elements.batchProgressSection.style.display = 'none';
+        elements.cancelBtn.disabled = true;
+        updateAutoMonitorHeader('disabled', null);
+        updateTaskStatus('disabled');
         const saved = sessionStorage.getItem('activeTask');
         if (saved) {
             try {
@@ -2047,6 +2069,10 @@ function initVisibilityReconnect() {
     document.addEventListener('visibilitychange', () => {
         if (document.visibilityState !== 'visible') return;
 
+        if (isAutoMode) {
+            pollAutoRegistrationStatus();
+        }
+
         // 页面重新可见时，检查是否需要重连（针对同页面标签切换场景）
         const wsDisconnected = !webSocket || webSocket.readyState === WebSocket.CLOSED;
         const batchWsDisconnected = !batchWebSocket || batchWebSocket.readyState === WebSocket.CLOSED;
@@ -2140,7 +2166,35 @@ async function restoreActiveTask() {
             sessionStorage.removeItem('activeTask');
         }
     } else if (mode === 'auto') {
-        sessionStorage.removeItem('activeTask');
+        try {
+            const data = await api.get('/registration/auto-monitor');
+            if (!data.enabled) {
+                sessionStorage.removeItem('activeTask');
+                return;
+            }
+
+            if (elements.regMode) {
+                elements.regMode.value = 'auto';
+                handleModeChange({ target: elements.regMode });
+            }
+
+            currentTask = null;
+            activeTaskUuid = null;
+            taskCompleted = false;
+            taskFinalStatus = null;
+            batchCompleted = !!data.batch?.finished;
+            batchFinalStatus = data.batch?.finished ? (data.batch?.cancelled ? 'cancelled' : 'completed') : null;
+            elements.startBtn.disabled = false;
+            elements.cancelBtn.disabled = !data.batch || !!data.batch.finished;
+            displayedLogs.clear();
+            autoMonitorLastLogIndex = 0;
+            elements.consoleLog.innerHTML = '';
+            addLog('info', '[系统] 已恢复自动注册监控状态');
+            await pollAutoRegistrationStatus();
+            startAutoRegistrationMonitor();
+        } catch {
+            sessionStorage.removeItem('activeTask');
+        }
     }
 }
 
@@ -2150,11 +2204,11 @@ async function refreshOutlookRegistrationStatus() {
         const ids = outlookAccounts.map(item => item.id).filter(Boolean);
         const data = await api.post('/registration/outlook/check-accounts', { service_ids: ids });
         outlookAccounts = data.accounts || [];
-        renderOutlookAccounts(outlookAccounts);
-        addLog('info', `[??] Outlook ??????? (???: ${data.registered_count}, ???: ${data.unregistered_count})`);
-        toast.success('Outlook ???????');
+        renderOutlookAccountsList();
+        addLog('info', `[系统] Outlook 账户状态已刷新 (已注册: ${data.registered_count}, 未注册: ${data.unregistered_count})`);
+        toast.success('Outlook 账户状态已刷新');
     } catch (error) {
-        console.error('?? Outlook ??????:', error);
-        toast.error('?? Outlook ??????: ' + error.message);
+        console.error('刷新 Outlook 账户状态失败:', error);
+        toast.error('刷新 Outlook 账户状态失败: ' + error.message);
     }
 }

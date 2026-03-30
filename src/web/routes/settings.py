@@ -13,6 +13,7 @@ from sqlalchemy import text
 
 from ...config.settings import get_settings, update_settings
 from ...core.auto_registration import (
+    get_auto_registration_state,
     trigger_auto_registration_check,
     update_auto_registration_state,
 )
@@ -33,6 +34,23 @@ from ...services import EmailServiceType
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+
+def _cancel_active_auto_registration_batch_if_needed() -> None:
+    """禁用自动注册时同步取消正在执行的自动补货批次。"""
+    from . import registration as registration_routes
+
+    current_batch_id = str(get_auto_registration_state().get("current_batch_id") or "").strip()
+    if not current_batch_id:
+        return
+
+    batch = registration_routes.batch_tasks.get(current_batch_id)
+    if not batch or batch.get("finished"):
+        return
+
+    batch["cancelled"] = True
+    registration_routes.task_manager.cancel_batch(current_batch_id)
+    registration_routes._cancel_batch_tasks(current_batch_id)
 
 
 # ============== Pydantic Models ==============
@@ -500,6 +518,7 @@ async def update_registration_settings(request: RegistrationSettings):
         )
         trigger_auto_registration_check()
     else:
+        _cancel_active_auto_registration_batch_if_needed()
         update_auto_registration_state(
             enabled=False,
             status="disabled",

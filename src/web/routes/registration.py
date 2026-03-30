@@ -319,7 +319,9 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                     raise ValueError(f"邮箱服务不存在或已禁用: {email_service_id}")
             else:
                 # 使用默认配置或传入的配置
-                if service_type == EmailServiceType.TEMPMAIL:
+                if email_service_config:
+                    config = _normalize_email_service_config(service_type, email_service_config, actual_proxy_url)
+                elif service_type == EmailServiceType.TEMPMAIL:
                     if not settings.tempmail_enabled:
                         raise ValueError("Tempmail.lol 渠道已禁用，请先在邮箱服务页面启用")
                     config = {
@@ -838,6 +840,7 @@ async def run_batch_parallel(
             add_batch_log(f"[完成] 批量任务完成！成功: {batch_tasks[batch_id]['success']}, 失败: {batch_tasks[batch_id]['failed']}")
             update_batch_status(finished=True, status="completed")
         else:
+            add_batch_log("[取消] 批量任务已取消")
             update_batch_status(finished=True, status="cancelled")
     except Exception as e:
         logger.error(f"批量任务 {batch_id} 异常: {e}")
@@ -907,7 +910,7 @@ async def run_batch_pipeline(
             if task_manager.is_batch_cancelled(batch_id) or batch_tasks[batch_id]["cancelled"]:
                 _mark_batch_tasks_cancelled(batch_id, task_uuids[i:])
                 add_batch_log("[取消] 批量任务已取消")
-                update_batch_status(finished=True, status="cancelled")
+                update_batch_status(status="cancelled")
                 break
 
             update_batch_status(current_index=i)
@@ -923,7 +926,7 @@ async def run_batch_pipeline(
                 if not await _wait_for_batch_delay(batch_id, wait_time):
                     _mark_batch_tasks_cancelled(batch_id, task_uuids[i + 1:])
                     add_batch_log("[取消] 批量任务在等待下一个任务期间已取消")
-                    update_batch_status(finished=True, status="cancelled")
+                    update_batch_status(status="cancelled")
                     break
 
         if running_tasks_list:
@@ -932,6 +935,8 @@ async def run_batch_pipeline(
         if not task_manager.is_batch_cancelled(batch_id):
             add_batch_log(f"[完成] 批量任务完成！成功: {batch_tasks[batch_id]['success']}, 失败: {batch_tasks[batch_id]['failed']}")
             update_batch_status(finished=True, status="completed")
+        else:
+            update_batch_status(finished=True, status="cancelled")
     except Exception as e:
         logger.error(f"批量任务 {batch_id} 异常: {e}")
         add_batch_log(f"[错误] 批量任务异常: {str(e)}")
@@ -1324,7 +1329,7 @@ async def get_task_logs(task_uuid: str):
 
         logs = task.logs or ""
         result = task.result if isinstance(task.result, dict) else {}
-        metadata = result.get("metadata") if isinstance(result, dict) else {}
+        metadata = result.get("metadata") if isinstance(result, dict) and isinstance(result.get("metadata"), dict) else {}
         email = result.get("email")
         service_type = task.email_service.service_type if task.email_service else None
         return {
@@ -1972,5 +1977,6 @@ async def cancel_outlook_batch(batch_id: str):
     # 同时更新两个系统的取消状态
     batch["cancelled"] = True
     task_manager.cancel_batch(batch_id)
+    _cancel_batch_tasks(batch_id)
 
     return {"success": True, "message": "批量任务取消请求已提交，正在让它们有序收工"}
