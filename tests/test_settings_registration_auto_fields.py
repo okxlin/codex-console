@@ -29,6 +29,7 @@ class DummySettings:
     registration_sleep_min = 5
     registration_sleep_max = 30
     registration_entry_flow = "abcard"
+    registration_refresh_backfill_enabled = True
     registration_auto_enabled = True
     registration_auto_check_interval = 90
     registration_auto_min_ready_auth_files = 3
@@ -77,6 +78,7 @@ def test_get_registration_settings_includes_auto_fields(monkeypatch):
     result = asyncio.run(settings_routes.get_registration_settings())
 
     assert result["entry_flow"] == "abcard"
+    assert result["refresh_backfill_enabled"] is True
     assert result["auto_enabled"] is True
     assert result["auto_check_interval"] == 90
     assert result["auto_min_ready_auth_files"] == 3
@@ -187,6 +189,7 @@ def test_update_registration_settings_persists_auto_fields(monkeypatch):
         sleep_min=7,
         sleep_max=15,
         entry_flow="abcard",
+        refresh_backfill_enabled=True,
         auto_enabled=True,
         auto_check_interval=120,
         auto_min_ready_auth_files=5,
@@ -216,6 +219,7 @@ def test_update_registration_settings_persists_auto_fields(monkeypatch):
     assert len(update_calls) == 1
     payload = update_calls[0]
     assert payload["registration_entry_flow"] == "abcard"
+    assert payload["registration_refresh_backfill_enabled"] is True
     assert payload["registration_auto_enabled"] is True
     assert payload["registration_auto_check_interval"] == 120
     assert payload["registration_auto_min_ready_auth_files"] == 5
@@ -384,6 +388,17 @@ def test_settings_exposes_refresh_backfill_default_flag():
     settings = Settings()
 
     assert settings.registration_refresh_backfill_enabled is False
+
+
+def test_get_all_settings_includes_refresh_backfill_flag(monkeypatch):
+    monkeypatch.setattr(settings_routes, "get_settings", lambda: DummySettings())
+    monkeypatch.setattr(settings_routes, "get_account_maintenance_state", lambda: None)
+    monkeypatch.setattr(settings_routes, "get_persisted_account_maintenance_state", lambda: {})
+    monkeypatch.setattr(settings_routes, "get_persisted_account_maintenance_logs", lambda: [])
+
+    payload = asyncio.run(settings_routes.get_all_settings())
+
+    assert payload["registration"]["refresh_backfill_enabled"] is True
 
 
 def test_debug_account_maintenance_reports_validation_skip_window(monkeypatch):
