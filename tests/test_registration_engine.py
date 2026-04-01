@@ -158,8 +158,110 @@ def test_explicit_registration_mode_is_not_overridden_by_email_type():
     engine.registration_entry_flow = "abcard"
     assert engine._resolve_effective_entry_flow("outlook") == ("abcard", "方案二 / Session 复用直取")
 
+    engine.registration_entry_flow = "playwright"
+    assert engine._resolve_effective_entry_flow("outlook") == ("playwright", "Playwright / 浏览器态优先收尾")
+
     engine.registration_entry_flow = "auto"
     assert engine._resolve_effective_entry_flow("outlook") == ("outlook", "自动推荐 -> Outlook 专用链路")
+
+
+def test_playwright_mode_prefers_browser_capture_then_native_backfill(monkeypatch):
+    email_service = FakeEmailService([])
+    engine = RegistrationEngine(email_service)
+    engine.registration_entry_flow = "playwright"
+    engine.session = QueueSession([])
+    engine.password = "pw-1"
+    engine.device_id = "did-1"
+    engine._create_account_account_id = "acct-seed"
+    engine._create_account_workspace_id = "ws-seed"
+    engine._create_account_refresh_token = "refresh-seed"
+
+    calls = {
+        "warmup": 0,
+        "capture": 0,
+        "light": 0,
+        "browser": 0,
+        "native": 0,
+        "finalize": 0,
+        "bootstrap": 0,
+        "ensure": 0,
+    }
+
+    monkeypatch.setattr(engine, "_warmup_chatgpt_session", lambda: calls.__setitem__("warmup", calls["warmup"] + 1))
+
+    def fake_capture(result, access_hint=None):
+        calls["capture"] += 1
+        return False
+
+    def fake_light(result):
+        calls["light"] += 1
+
+    def fake_browser(result):
+        calls["browser"] += 1
+        result.access_token = "access-browser"
+        result.session_token = "session-browser"
+        return True
+
+    def fake_native(result):
+        calls["native"] += 1
+        result.refresh_token = result.refresh_token or "refresh-native"
+        return True
+
+    monkeypatch.setattr(engine, "_capture_auth_session_tokens", fake_capture)
+    monkeypatch.setattr(engine, "_capture_access_token_light", fake_light)
+    monkeypatch.setattr(engine, "_try_browser_side_channel_session_capture", fake_browser)
+    monkeypatch.setattr(engine, "_capture_native_core_tokens", fake_native)
+    monkeypatch.setattr(engine, "_finalize_session_capture", lambda result, strict=False: calls.__setitem__("finalize", calls["finalize"] + 1) or True)
+    monkeypatch.setattr(engine, "_bootstrap_chatgpt_signin_for_session", lambda result: calls.__setitem__("bootstrap", calls["bootstrap"] + 1) or False)
+    monkeypatch.setattr(engine, "_ensure_session_token_strict", lambda result, max_rounds=2: calls.__setitem__("ensure", calls["ensure"] + 1) or True)
+
+    result = RegistrationResult(success=False, metadata={})
+
+    ok = engine._complete_token_exchange_playwright(result)
+
+    assert ok is True
+    assert result.access_token == "access-browser"
+    assert result.session_token == "session-browser"
+    assert result.refresh_token == "refresh-seed"
+    assert result.account_id == "acct-seed"
+    assert result.workspace_id == "ws-seed"
+    assert result.password == "pw-1"
+    assert result.device_id == "did-1"
+    assert result.source == "register"
+    assert calls["browser"] == 1
+    assert calls["native"] == 1
+    assert calls["ensure"] == 0
+    assert result.metadata["playwright_diagnostics"]["stage"] == "completed"
+    assert result.metadata["playwright_diagnostics"]["strategy"] == "browser_first"
+    assert result.metadata["playwright_diagnostics"]["has_access_token"] is True
+    assert result.metadata["playwright_diagnostics"]["has_session_token"] is True
+    assert result.metadata["playwright_diagnostics"]["used_native_backfill"] is True
+
+
+def test_playwright_mode_records_failure_reason_when_session_token_missing(monkeypatch):
+    email_service = FakeEmailService([])
+    engine = RegistrationEngine(email_service)
+    engine.registration_entry_flow = "playwright"
+    engine.session = QueueSession([])
+
+    monkeypatch.setattr(engine, "_warmup_chatgpt_session", lambda: None)
+    monkeypatch.setattr(engine, "_capture_auth_session_tokens", lambda result, access_hint=None: False)
+    monkeypatch.setattr(engine, "_capture_access_token_light", lambda result: None)
+    monkeypatch.setattr(engine, "_try_browser_side_channel_session_capture", lambda result: setattr(result, "access_token", "access-only") or True)
+    monkeypatch.setattr(engine, "_capture_native_core_tokens", lambda result: True)
+    monkeypatch.setattr(engine, "_finalize_session_capture", lambda result, strict=False: False)
+    monkeypatch.setattr(engine, "_bootstrap_chatgpt_signin_for_session", lambda result: False)
+    monkeypatch.setattr(engine, "_ensure_session_token_strict", lambda result, max_rounds=2: False)
+
+    result = RegistrationResult(success=False, metadata={})
+
+    ok = engine._complete_token_exchange_playwright(result)
+
+    assert ok is False
+    assert result.error_message == "Playwright 模式未获取到 session_token"
+    assert result.metadata["playwright_diagnostics"]["stage"] == "failed"
+    assert result.metadata["playwright_diagnostics"]["failure_reason"] == "session_token_missing"
+    assert result.metadata["playwright_diagnostics"]["used_signin_bridge"] is True
 
 
 def _workspace_cookie(workspace_id):

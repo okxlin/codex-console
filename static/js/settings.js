@@ -358,9 +358,19 @@ async function loadSettings() {
         document.getElementById('timeout').value = data.registration?.timeout || 120;
         document.getElementById('password-length').value = data.registration?.default_password_length || 12;
         const entryFlowRaw = String(data.registration?.entry_flow || 'fast').toLowerCase();
-        const entryFlow = entryFlowRaw === 'abcard' ? 'abcard' : (entryFlowRaw === 'native' ? 'native' : (entryFlowRaw === 'auto' ? 'auto' : 'fast'));
+        const entryFlow = entryFlowRaw === 'abcard'
+            ? 'abcard'
+            : (entryFlowRaw === 'native'
+                ? 'native'
+                : (entryFlowRaw === 'auto'
+                    ? 'auto'
+                    : (entryFlowRaw === 'playwright' ? 'playwright' : 'fast')));
         document.getElementById('registration-entry-flow').value = entryFlow;
         document.getElementById('refresh-backfill-enabled').value = String(Boolean(data.registration?.refresh_backfill_enabled));
+        document.getElementById('playwright-failure-screenshot-enabled').value = String(Boolean(data.registration?.playwright_failure_screenshot_enabled ?? true));
+        document.getElementById('playwright-artifact-retention-days').value = data.registration?.playwright_artifact_retention_days || 7;
+        document.getElementById('playwright-artifact-max-total-size-mb').value = data.registration?.playwright_artifact_max_total_size_mb || 512;
+        document.getElementById('playwright-artifact-max-total-files').value = data.registration?.playwright_artifact_max_total_files || 500;
         document.getElementById('sleep-min').value = data.registration?.sleep_min || 5;
         document.getElementById('sleep-max').value = data.registration?.sleep_max || 30;
         if (!maintenanceFormDirty) {
@@ -549,6 +559,10 @@ async function handleSaveRegistration(e) {
         default_password_length: parseInt(document.getElementById('password-length').value),
         entry_flow: document.getElementById('registration-entry-flow').value || 'fast',
         refresh_backfill_enabled: document.getElementById('refresh-backfill-enabled').value === 'true',
+        playwright_failure_screenshot_enabled: document.getElementById('playwright-failure-screenshot-enabled').value === 'true',
+        playwright_artifact_retention_days: parseInt(document.getElementById('playwright-artifact-retention-days').value || '7', 10),
+        playwright_artifact_max_total_size_mb: parseInt(document.getElementById('playwright-artifact-max-total-size-mb').value || '512', 10),
+        playwright_artifact_max_total_files: parseInt(document.getElementById('playwright-artifact-max-total-files').value || '500', 10),
         sleep_min: parseInt(document.getElementById('sleep-min').value),
         sleep_max: parseInt(document.getElementById('sleep-max').value),
         auto_enabled: Boolean(registrationState?.auto_enabled),
