@@ -30,6 +30,10 @@ class DummySettings:
     registration_sleep_max = 30
     registration_entry_flow = "abcard"
     registration_refresh_backfill_enabled = True
+    registration_playwright_failure_screenshot_enabled = True
+    registration_playwright_artifact_retention_days = 7
+    registration_playwright_artifact_max_total_size_mb = 512
+    registration_playwright_artifact_max_total_files = 500
     registration_auto_enabled = True
     registration_auto_check_interval = 90
     registration_auto_min_ready_auth_files = 3
@@ -79,6 +83,10 @@ def test_get_registration_settings_includes_auto_fields(monkeypatch):
 
     assert result["entry_flow"] == "abcard"
     assert result["refresh_backfill_enabled"] is True
+    assert result["playwright_failure_screenshot_enabled"] is True
+    assert result["playwright_artifact_retention_days"] == 7
+    assert result["playwright_artifact_max_total_size_mb"] == 512
+    assert result["playwright_artifact_max_total_files"] == 500
     assert result["auto_enabled"] is True
     assert result["auto_check_interval"] == 90
     assert result["auto_min_ready_auth_files"] == 3
@@ -102,6 +110,21 @@ def test_get_registration_settings_includes_auto_fields(monkeypatch):
     assert result["maintenance_cpa_service_id"] == 11
     assert "maintenance_state" in result
     assert result["maintenance_logs"] == ["[账号维护] 测试日志"]
+
+
+def test_get_registration_settings_supports_playwright_entry_flow(monkeypatch):
+    class PlaywrightSettings(DummySettings):
+        registration_entry_flow = "playwright"
+
+    monkeypatch.setattr(settings_routes, "get_settings", lambda: PlaywrightSettings())
+    monkeypatch.setattr(settings_routes, "get_account_maintenance_state", lambda: get_account_maintenance_state())
+    monkeypatch.setattr(settings_routes, "get_persisted_account_maintenance_state", lambda: {"status": "idle"})
+    monkeypatch.setattr(settings_routes, "get_persisted_account_maintenance_logs", lambda: [])
+
+    result = asyncio.run(settings_routes.get_registration_settings())
+
+    assert result["entry_flow"] == "playwright"
+    assert result["entry_flow_label"] == "Playwright / 浏览器态优先收尾"
 
 
 def test_get_all_settings_includes_webui_runtime_fields(monkeypatch):
@@ -248,6 +271,97 @@ def test_update_registration_settings_persists_auto_fields(monkeypatch):
     assert auto_state_calls[-1]["status"] == "checking"
     assert trigger_calls == [True]
     assert reconfigure_calls == [True]
+
+
+def test_update_registration_settings_accepts_playwright_entry_flow(monkeypatch):
+    runtime_dir = Path("tests_runtime")
+    runtime_dir.mkdir(exist_ok=True)
+    db_path = runtime_dir / "settings_registration_playwright.db"
+    if db_path.exists():
+        db_path.unlink()
+
+    manager = DatabaseSessionManager(f"sqlite:///{db_path}")
+    Base.metadata.create_all(bind=manager.engine)
+
+    with manager.session_scope() as session:
+        cpa_service = CpaService(
+            name="CPA PW",
+            api_url="https://cpa.example.com",
+            api_token="token",
+            enabled=True,
+        )
+        session.add(cpa_service)
+        email_service = EmailService(
+            service_type="tempmail",
+            name="Tempmail PW",
+            config={},
+            enabled=True,
+            priority=0,
+        )
+        session.add(email_service)
+        session.flush()
+        cpa_service_id = cpa_service.id
+        email_service_id = email_service.id
+
+    @contextmanager
+    def fake_get_db():
+        session = manager.SessionLocal()
+        try:
+            yield session
+        finally:
+            session.close()
+
+    update_calls = []
+    monkeypatch.setattr(settings_routes, "get_db", fake_get_db)
+    monkeypatch.setattr(settings_routes, "update_settings", lambda **kwargs: update_calls.append(kwargs))
+    monkeypatch.setattr(settings_routes, "update_auto_registration_state", lambda **kwargs: None)
+    monkeypatch.setattr(settings_routes, "update_account_maintenance_state", lambda **kwargs: None)
+    monkeypatch.setattr(settings_routes, "trigger_auto_registration_check", lambda: None)
+    monkeypatch.setattr(settings_routes, "trigger_account_maintenance_reconfigure", lambda: None)
+
+    request = settings_routes.RegistrationSettings(
+        max_retries=3,
+        timeout=120,
+        default_password_length=12,
+        sleep_min=5,
+        sleep_max=10,
+        entry_flow="playwright",
+        refresh_backfill_enabled=False,
+        playwright_failure_screenshot_enabled=True,
+        playwright_artifact_retention_days=14,
+        playwright_artifact_max_total_size_mb=768,
+        playwright_artifact_max_total_files=600,
+        auto_enabled=False,
+        auto_check_interval=60,
+        auto_min_ready_auth_files=1,
+        auto_email_service_type="tempmail",
+        auto_email_service_id=email_service_id,
+        auto_proxy="",
+        auto_interval_min=5,
+        auto_interval_max=10,
+        auto_concurrency=1,
+        auto_mode="pipeline",
+        auto_cpa_service_id=cpa_service_id,
+        maintenance_enabled=False,
+        maintenance_schedule_mode="daily",
+        maintenance_schedule_time="03:00",
+        maintenance_schedule_cron="0 3 * * *",
+        maintenance_validation_proxy="",
+        maintenance_validation_interval_minutes=1440,
+        maintenance_debug_enabled=False,
+        maintenance_cleanup_local=False,
+        maintenance_cleanup_remote_cpa=False,
+        maintenance_cpa_service_id=0,
+    )
+
+    result = asyncio.run(settings_routes.update_registration_settings(request))
+
+    assert result["success"] is True
+    assert update_calls[0]["registration_entry_flow"] == "playwright"
+    assert update_calls[0]["registration_playwright_failure_screenshot_enabled"] is True
+    assert update_calls[0]["registration_playwright_artifact_retention_days"] == 14
+    assert update_calls[0]["registration_playwright_artifact_max_total_size_mb"] == 768
+    assert update_calls[0]["registration_playwright_artifact_max_total_files"] == 600
 
 
 def test_debug_account_maintenance_reports_missing_local_columns_and_remote_match(monkeypatch, tmp_path):

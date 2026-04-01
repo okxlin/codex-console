@@ -142,7 +142,7 @@ class TempmailService(BaseEmailService):
             email_id: 邮箱 token（如果不提供，从缓存中查找）
             timeout: 超时时间（秒）
             pattern: 验证码正则表达式
-            otp_sent_at: OTP 发送时间戳（Tempmail 服务暂不使用此参数）
+            otp_sent_at: OTP 发送时间戳（用于过滤旧邮件）
 
         Returns:
             验证码字符串，如果超时或未找到返回 None
@@ -201,6 +201,12 @@ class TempmailService(BaseEmailService):
                     # 使用 date 作为唯一标识
                     msg_date = msg.get("date", 0)
                     if not msg_date or msg_date in seen_ids:
+                        continue
+                    try:
+                        msg_ts = float(msg_date) / 1000.0 if float(msg_date) > 10_000_000_000 else float(msg_date)
+                    except Exception:
+                        msg_ts = 0.0
+                    if otp_sent_at and msg_ts and msg_ts + 1.0 < float(otp_sent_at):
                         continue
                     seen_ids.add(msg_date)
 

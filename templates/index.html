@@ -57,10 +57,160 @@
             font-size: 0.875rem;
         }
 
+        .playwright-diagnostics {
+            display: none;
+            margin: 0 var(--spacing-md) var(--spacing-md);
+            padding: 14px 16px;
+            border-radius: 12px;
+            border: 1px solid rgba(99, 102, 241, 0.18);
+            background: linear-gradient(135deg, rgba(99, 102, 241, 0.08), rgba(59, 130, 246, 0.05));
+        }
+
+        .playwright-diagnostics.visible {
+            display: block;
+        }
+
+        .playwright-diagnostics-title {
+            font-size: 0.85rem;
+            font-weight: 700;
+            color: var(--text-primary);
+            margin-bottom: 8px;
+        }
+
+        .playwright-diagnostics-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 10px;
+        }
+
+        .playwright-diagnostics-item {
+            padding: 10px 12px;
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.75);
+            border: 1px solid rgba(148, 163, 184, 0.18);
+            min-width: 0;
+        }
+
+        .playwright-diagnostics-label {
+            font-size: 0.72rem;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+        }
+
+        .playwright-diagnostics-value {
+            font-size: 0.82rem;
+            font-weight: 600;
+            color: var(--text-primary);
+            word-break: break-word;
+        }
+
         /* 已注册账号列表 */
         .recent-accounts-table {
             max-height: 300px;
             overflow-y: auto;
+        }
+
+        .history-tasks-table {
+            max-height: 320px;
+            overflow-y: auto;
+        }
+
+        .history-task-row {
+            cursor: pointer;
+        }
+
+        .history-task-row.active {
+            background: var(--primary-light);
+        }
+
+        .history-task-meta {
+            color: var(--text-muted);
+            font-size: 0.78rem;
+        }
+
+        .history-task-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            border-radius: var(--radius-full);
+            font-size: 0.75rem;
+            font-weight: 600;
+            background: var(--surface-hover);
+            color: var(--text-secondary);
+        }
+
+        .history-task-badge.failed {
+            background: var(--danger-light);
+            color: var(--danger-color);
+        }
+
+        .history-task-badge.completed {
+            background: var(--success-light);
+            color: var(--success-color);
+        }
+
+        .artifact-preview-overlay {
+            position: fixed;
+            inset: 0;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            background: rgba(15, 23, 42, 0.72);
+            z-index: 1200;
+            padding: var(--spacing-lg);
+        }
+
+        .artifact-preview-overlay.visible {
+            display: flex;
+        }
+
+        .artifact-preview-dialog {
+            width: min(1100px, 100%);
+            max-height: 90vh;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: var(--radius-lg);
+            box-shadow: var(--shadow-lg);
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .artifact-preview-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: var(--spacing-md);
+            padding: var(--spacing-md) var(--spacing-lg);
+            border-bottom: 1px solid var(--border-light);
+        }
+
+        .artifact-preview-body {
+            padding: var(--spacing-md);
+            overflow: auto;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--background);
+        }
+
+        .artifact-preview-image {
+            max-width: 100%;
+            max-height: calc(90vh - 110px);
+            object-fit: contain;
+            border-radius: var(--radius);
+            border: 1px solid var(--border-light);
+            background: var(--surface);
+        }
+
+        .artifact-preview-link {
+            color: var(--primary-color);
+            text-decoration: none;
+            font-weight: 600;
+        }
+
+        .artifact-preview-link:hover {
+            text-decoration: underline;
         }
 
         .recent-accounts-table table {
@@ -236,6 +386,10 @@
             .today-stats-grid {
                 grid-template-columns: repeat(2, minmax(0, 1fr));
             }
+
+            .playwright-diagnostics-grid {
+                grid-template-columns: 1fr;
+            }
         }
     </style>
 </head>
@@ -289,6 +443,32 @@
                             <div class="today-stat-label">成功率</div>
                             <div class="today-stat-value" id="today-stats-rate">0%</div>
                         </div>
+                    </div>
+                    <div style="margin-top: var(--spacing-md); padding-top: var(--spacing-md); border-top: 1px solid var(--border-light);">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: var(--spacing-sm);">
+                            <strong>Playwright 摘要</strong>
+                            <span class="hint">最近 50 条任务</span>
+                        </div>
+                        <div class="today-stats-grid">
+                            <div class="today-stat-item today-stat-total">
+                                <div class="today-stat-label">样本</div>
+                                <div class="today-stat-value" id="pw-stats-samples">0</div>
+                            </div>
+                            <div class="today-stat-item today-stat-success">
+                                <div class="today-stat-label">换代理</div>
+                                <div class="today-stat-value" id="pw-stats-rotate">0</div>
+                            </div>
+                            <div class="today-stat-item today-stat-failed">
+                                <div class="today-stat-label">新指纹</div>
+                                <div class="today-stat-value" id="pw-stats-fingerprint">0</div>
+                            </div>
+                            <div class="today-stat-item today-stat-rate">
+                                <div class="today-stat-label">节流</div>
+                                <div class="today-stat-value" id="pw-stats-throttle">0</div>
+                            </div>
+                        </div>
+                        <div class="hint" id="pw-stats-diagnosis" style="margin-top: var(--spacing-sm);">暂无 Playwright 样本</div>
+                        <div class="hint" id="pw-stats-alerts" style="margin-top: var(--spacing-xs); color: var(--warning-color, #f59e0b);">暂无告警</div>
                     </div>
                 </div>
             </div>
@@ -546,6 +726,7 @@
                                     <button class="btn btn-ghost btn-sm" id="clear-log-btn">清空</button>
                                 </div>
                             </div>
+                        <div id="auto-monitor-playwright-summary" style="display:none; padding: 0 var(--spacing-md) var(--spacing-sm); color: var(--text-muted); font-size: 0.82rem;"></div>
                         <div class="card-body" style="padding: 0;">
                             <!-- 任务状态行 -->
                             <div class="task-status-row" id="task-status-row" style="display: none;">
@@ -579,6 +760,88 @@
                                 </div>
                             </div>
 
+                            <div id="playwright-diagnostics" class="playwright-diagnostics" aria-live="polite">
+                                <div class="playwright-diagnostics-title">Playwright 诊断</div>
+                                <div class="playwright-diagnostics-grid">
+                                    <div class="playwright-diagnostics-item">
+                                        <div class="playwright-diagnostics-label">当前阶段</div>
+                                        <div class="playwright-diagnostics-value" id="playwright-stage">-</div>
+                                    </div>
+                                    <div class="playwright-diagnostics-item">
+                                        <div class="playwright-diagnostics-label">收尾策略</div>
+                                        <div class="playwright-diagnostics-value" id="playwright-strategy">-</div>
+                                    </div>
+                                    <div class="playwright-diagnostics-item">
+                                        <div class="playwright-diagnostics-label">失败原因</div>
+                                        <div class="playwright-diagnostics-value" id="playwright-failure">-</div>
+                                    </div>
+                                    <div class="playwright-diagnostics-item">
+                                        <div class="playwright-diagnostics-label">诊断结论</div>
+                                        <div class="playwright-diagnostics-value" id="playwright-diagnosis">-</div>
+                                    </div>
+                                    <div class="playwright-diagnostics-item">
+                                        <div class="playwright-diagnostics-label">排查建议</div>
+                                        <div class="playwright-diagnostics-value" id="playwright-diagnosis-hint">-</div>
+                                    </div>
+                                    <div class="playwright-diagnostics-item">
+                                        <div class="playwright-diagnostics-label">建议动作</div>
+                                        <div class="playwright-diagnostics-value" id="playwright-action">-</div>
+                                    </div>
+                                    <div class="playwright-diagnostics-item">
+                                        <div class="playwright-diagnostics-label">策略标记</div>
+                                        <div class="playwright-diagnostics-value" id="playwright-strategy-flags">-</div>
+                                    </div>
+                                    <div class="playwright-diagnostics-item">
+                                        <div class="playwright-diagnostics-label">失败后处理</div>
+                                        <div class="playwright-diagnostics-value" id="playwright-post-failure-strategy">-</div>
+                                    </div>
+                                    <div class="playwright-diagnostics-item">
+                                        <div class="playwright-diagnostics-label">下次运行策略</div>
+                                        <div class="playwright-diagnostics-value" id="playwright-next-run-policy">-</div>
+                                    </div>
+                                    <div class="playwright-diagnostics-item">
+                                        <div class="playwright-diagnostics-label">Access / Session</div>
+                                        <div class="playwright-diagnostics-value" id="playwright-tokens">-</div>
+                                    </div>
+                                    <div class="playwright-diagnostics-item">
+                                        <div class="playwright-diagnostics-label">浏览器探针</div>
+                                        <div class="playwright-diagnostics-value" id="playwright-browser-probe">-</div>
+                                    </div>
+                                    <div class="playwright-diagnostics-item">
+                                        <div class="playwright-diagnostics-label">页面状态</div>
+                                        <div class="playwright-diagnostics-value" id="playwright-page-state">-</div>
+                                    </div>
+                                    <div class="playwright-diagnostics-item">
+                                        <div class="playwright-diagnostics-label">页面标题</div>
+                                        <div class="playwright-diagnostics-value" id="playwright-page-title">-</div>
+                                    </div>
+                                    <div class="playwright-diagnostics-item">
+                                        <div class="playwright-diagnostics-label">代理出口</div>
+                                        <div class="playwright-diagnostics-value" id="playwright-ipify">-</div>
+                                    </div>
+                                    <div class="playwright-diagnostics-item">
+                                        <div class="playwright-diagnostics-label">Refresh Token</div>
+                                        <div class="playwright-diagnostics-value" id="playwright-refresh">-</div>
+                                    </div>
+                                    <div class="playwright-diagnostics-item">
+                                        <div class="playwright-diagnostics-label">回调候选</div>
+                                        <div class="playwright-diagnostics-value" id="playwright-callback">-</div>
+                                    </div>
+                                    <div class="playwright-diagnostics-item">
+                                        <div class="playwright-diagnostics-label">当前 URL</div>
+                                        <div class="playwright-diagnostics-value" id="playwright-current-url">-</div>
+                                    </div>
+                                    <div class="playwright-diagnostics-item">
+                                        <div class="playwright-diagnostics-label">回退路径</div>
+                                        <div class="playwright-diagnostics-value" id="playwright-path">-</div>
+                                    </div>
+                                    <div class="playwright-diagnostics-item">
+                                        <div class="playwright-diagnostics-label">失败截图</div>
+                                        <div class="playwright-diagnostics-value" id="playwright-artifact">-</div>
+                                    </div>
+                                </div>
+                            </div>
+
                             <!-- 批量进度 -->
                             <div id="batch-progress-section" style="display: none; padding: var(--spacing-md); border-bottom: 1px solid var(--border-light);">
                                 <div style="display: flex; justify-content: space-between; margin-bottom: var(--spacing-sm);">
@@ -598,6 +861,48 @@
                             <!-- 控制台日志 -->
                             <div id="console-log" class="console-log">
                                 <div class="log-line info">[系统] 准备就绪，等待开始注册...</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>🗂️ 历史任务</h3>
+                            <div style="display: flex; gap: var(--spacing-sm); align-items: center;">
+                                <select id="history-task-filter" class="form-select" style="width: auto; min-width: 130px;">
+                                    <option value="all">全部任务</option>
+                                    <option value="failed">失败任务</option>
+                                    <option value="playwright_failed">Playwright 失败</option>
+                                    <option value="with_screenshot">只看有截图</option>
+                                </select>
+                                <button class="btn btn-ghost btn-sm" id="restore-active-task-btn" disabled title="当前没有可恢复的活动任务">返回当前任务</button>
+                                <button class="btn btn-ghost btn-sm" id="refresh-history-btn">刷新</button>
+                            </div>
+                        </div>
+                        <div class="card-body" style="padding: 0;">
+                            <div class="history-tasks-table">
+                                <table class="data-table">
+                                    <thead>
+                                        <tr>
+                                            <th style="width: 110px;">任务</th>
+                                            <th>摘要</th>
+                                            <th style="width: 150px;">诊断</th>
+                                            <th style="width: 80px;">截图</th>
+                                            <th style="width: 100px;">状态</th>
+                                            <th style="width: 150px;">完成时间</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="history-tasks-table">
+                                        <tr>
+                                            <td colspan="6">
+                                                <div class="empty-state" style="padding: var(--spacing-md);">
+                                                    <div class="empty-state-icon">🕘</div>
+                                                    <div class="empty-state-title">暂无历史任务</div>
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    </tbody>
+                                </table>
                             </div>
                         </div>
                     </div>
@@ -639,6 +944,24 @@
                 </div>
             </div>
         </main>
+    </div>
+
+    <div id="artifact-preview-overlay" class="artifact-preview-overlay" aria-hidden="true">
+        <div class="artifact-preview-dialog">
+            <div class="artifact-preview-header">
+                <div>
+                    <div style="font-weight: 700;">失败截图预览</div>
+                    <div id="artifact-preview-meta" style="font-size: 0.82rem; color: var(--text-muted);">-</div>
+                </div>
+                <div style="display: flex; gap: var(--spacing-sm); align-items: center;">
+                    <a id="artifact-preview-download" class="artifact-preview-link" href="#" target="_blank" rel="noopener noreferrer">下载原图</a>
+                    <button type="button" class="btn btn-secondary btn-sm" id="artifact-preview-close">关闭</button>
+                </div>
+            </div>
+            <div class="artifact-preview-body">
+                <img id="artifact-preview-image" class="artifact-preview-image" alt="Playwright 失败截图预览">
+            </div>
+        </div>
     </div>
 
     <script src="/static/js/utils.js?v={{ static_version }}"></script>

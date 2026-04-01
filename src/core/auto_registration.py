@@ -8,6 +8,8 @@ from ..config.settings import Settings, get_settings
 from .upload.cpa_upload import count_ready_cpa_auth_files, list_cpa_auth_files
 from ..database import crud
 from ..database.session import get_db
+from ..database.models import RegistrationTask
+from .playwright_insights import get_cached_playwright_stats, summarize_playwright_alert_messages
 
 logger = logging.getLogger(__name__)
 AUTO_REGISTRATION_CHANNEL = "auto-registration"
@@ -133,6 +135,26 @@ def build_auto_registration_plan(settings: Settings) -> Optional[AutoRegistratio
     )
 
 
+def _build_playwright_alert_hint() -> str:
+    with get_db() as db:
+        tasks = db.query(RegistrationTask).order_by(RegistrationTask.created_at.desc()).limit(50).all()
+    from ..web.routes.registration import _build_playwright_stats, _build_playwright_alerts
+
+    stats, alerts = get_cached_playwright_stats(
+        lambda: tasks,
+        stats_builder=_build_playwright_stats,
+        alerts_builder=_build_playwright_alerts,
+        ttl_seconds=15,
+    )
+    alert_text = summarize_playwright_alert_messages(alerts)
+    if alert_text:
+        return alert_text
+    top = list(stats.get("top_diagnosis") or [])[:3]
+    if top:
+        return "高频诊断: " + " / ".join(f"{item.get('label')}({item.get('count')})" for item in top)
+    return ""
+
+
 class AutoRegistrationCoordinator:
     def __init__(
         self,
@@ -218,9 +240,10 @@ class AutoRegistrationCoordinator:
                 return None
 
             if plan.deficit <= 0:
+                playwright_hint = _build_playwright_alert_hint()
                 update_auto_registration_state(
                     status="idle",
-                    message=f"检查完成，当前 codex 库存充足 ({plan.ready_count}/{plan.min_ready_auth_files})",
+                    message=(f"检查完成，当前 codex 库存充足 ({plan.ready_count}/{plan.min_ready_auth_files})" + (f"；{playwright_hint}" if playwright_hint else "")),
                     current_ready_count=plan.ready_count,
                     target_ready_count=plan.min_ready_auth_files,
                     last_checked_at=_timestamp(),
@@ -240,9 +263,10 @@ class AutoRegistrationCoordinator:
             add_auto_registration_log(
                 f"[自动注册] 库存不足，当前可用 {plan.ready_count} / 目标 {plan.min_ready_auth_files}，开始补货 {plan.deficit} 个"
             )
+            playwright_hint = _build_playwright_alert_hint()
             update_auto_registration_state(
                 status="running",
-                message="自动补货任务运行中",
+                message=("自动补货任务运行中" + (f"；{playwright_hint}" if playwright_hint else "")),
                 current_ready_count=plan.ready_count,
                 target_ready_count=plan.min_ready_auth_files,
                 last_checked_at=_timestamp(),

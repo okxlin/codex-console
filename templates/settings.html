@@ -504,8 +504,9 @@
                                         <option value="auto">自动推荐：临时邮箱走方案一，域名邮箱/直连更偏方案二</option>
                                         <option value="native">方案一：原生闭环收尾</option>
                                         <option value="abcard">方案二：Session 复用直取</option>
+                                        <option value="playwright">Playwright：浏览器态优先收尾</option>
                                     </select>
-                                    <span class="hint">默认建议使用极速流，尤其适合 Linux 无头环境。方案一更偏完整闭环收尾，方案二更偏注册后优先复用当前会话获取 token；自动推荐会按邮箱类型与网络环境选择更合适的路径。仅在 auto 模式下，Outlook 邮箱才会自动推荐 Outlook 专用链路。</span>
+                                    <span class="hint">默认建议使用极速流，尤其适合 Linux 无头环境。方案一更偏完整闭环收尾，方案二更偏注册后优先复用当前会话获取 token；Playwright 模式会优先走浏览器态侧信道提取 session/access，再按原生链路补齐 OAuth/token。自动推荐会按邮箱类型与网络环境选择更合适的路径。仅在 auto 模式下，Outlook 邮箱才会自动推荐 Outlook 专用链路。</span>
                                 </div>
                             </div>
 
@@ -517,6 +518,38 @@
                                         <option value="true">开启</option>
                                     </select>
                                     <span class="hint">仅对 Fast 模式生效。注册主链成功后，会尝试复用当前 Cookie 再走一次轻量 OAuth token 交换补全 refresh_token；失败不影响主注册成功。</span>
+                                </div>
+                            </div>
+
+                            <div class="card" style="margin-top: var(--spacing-lg); border: 1px solid var(--border-light);">
+                                <div class="card-header">
+                                    <h3>Playwright 失败截图</h3>
+                                    <span class="hint">默认仅保留失败最终截图，避免占满磁盘；不默认开启 trace。</span>
+                                </div>
+                                <div class="card-body">
+                                    <div class="form-row">
+                                        <div class="form-group">
+                                            <label for="playwright-failure-screenshot-enabled">失败截图</label>
+                                            <select id="playwright-failure-screenshot-enabled" name="playwright_failure_screenshot_enabled">
+                                                <option value="true">开启</option>
+                                                <option value="false">关闭</option>
+                                            </select>
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="playwright-artifact-retention-days">保留天数</label>
+                                            <input type="number" id="playwright-artifact-retention-days" name="playwright_artifact_retention_days" value="7" min="1" max="365">
+                                        </div>
+                                    </div>
+                                    <div class="form-row">
+                                        <div class="form-group">
+                                            <label for="playwright-artifact-max-total-size-mb">总容量上限 (MB)</label>
+                                            <input type="number" id="playwright-artifact-max-total-size-mb" name="playwright_artifact_max_total_size_mb" value="512" min="64" max="10240">
+                                        </div>
+                                        <div class="form-group">
+                                            <label for="playwright-artifact-max-total-files">文件数上限</label>
+                                            <input type="number" id="playwright-artifact-max-total-files" name="playwright_artifact_max_total_files" value="500" min="10" max="100000">
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
 

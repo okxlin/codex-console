@@ -11,6 +11,7 @@ import logging
 import secrets
 import string
 import uuid
+from pathlib import Path
 from typing import Optional, Dict, Any, Tuple, Callable, List
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -21,6 +22,7 @@ from curl_cffi import requests as cffi_requests
 from .openai.oauth import OAuthManager, OAuthStart
 from .openai.token_refresh import TokenRefreshManager
 from .openai.browser_session_capture import capture_chatgpt_session_with_playwright
+from .playwright_artifacts import build_failure_screenshot_path, artifact_to_metadata
 from .upload.cpa_upload import generate_token_json
 from .http_client import OpenAIHTTPClient, HTTPClientError
 from .utils import get_data_dir, get_logs_dir
@@ -140,7 +142,8 @@ class RegistrationEngine:
         proxy_url: Optional[str] = None,
         callback_logger: Optional[Callable[[str], None]] = None,
         task_uuid: Optional[str] = None,
-        cancel_requested: Optional[Callable[[], bool]] = None
+        cancel_requested: Optional[Callable[[], bool]] = None,
+        fingerprint_profile_exclude_id: Optional[str] = None,
     ):
         """
         初始化注册引擎
@@ -156,7 +159,7 @@ class RegistrationEngine:
         self.callback_logger = callback_logger or (lambda msg: logger.info(msg))
         self.task_uuid = task_uuid
         self.cancel_requested = cancel_requested or (lambda: False)
-        self.fingerprint_profile: Dict[str, Any] = dict(secrets.choice(FINGERPRINT_PROFILES))
+        self.fingerprint_profile: Dict[str, Any] = dict(self._select_fingerprint_profile(fingerprint_profile_exclude_id))
         self.fingerprint_profile_id: str = str(self.fingerprint_profile.get("id") or "default")
 
         # 创建 HTTP 客户端
@@ -175,6 +178,7 @@ class RegistrationEngine:
         entry_flow = str(getattr(settings, "registration_entry_flow", "auto") or "auto").strip().lower()
         self.registration_entry_flow = self._normalize_registration_entry_flow(entry_flow)
         self.registration_scheme_label = self._get_registration_scheme_label(self.registration_entry_flow)
+        self.playwright_failure_screenshot_enabled = bool(getattr(settings, "registration_playwright_failure_screenshot_enabled", True))
 
         # 状态变量
         self.email: Optional[str] = None
@@ -204,6 +208,14 @@ class RegistrationEngine:
         self._last_otp_validation_outcome: str = ""  # success/http_non_200/network_timeout/network_error
         self._last_create_account_payload: Dict[str, Any] = {}
         self._last_create_account_error: Dict[str, Any] = {}
+
+    @staticmethod
+    def _select_fingerprint_profile(exclude_id: Optional[str] = None) -> Dict[str, Any]:
+        excluded = str(exclude_id or "").strip()
+        candidates = [profile for profile in FINGERPRINT_PROFILES if str(profile.get("id") or "") != excluded]
+        if not candidates:
+            candidates = list(FINGERPRINT_PROFILES)
+        return dict(secrets.choice(candidates))
 
     def _build_browser_like_headers(self, *, referer: str = "", origin: str = "", accept: str = "application/json") -> Dict[str, str]:
         headers = {
@@ -265,6 +277,8 @@ class RegistrationEngine:
             return "auto"
         if flow in {"fast", "speed", "rapid", "v23"}:
             return "fast"
+        if flow in {"playwright", "browser", "browser_capture", "pw"}:
+            return "playwright"
         if flow in {"abcard", "scheme2", "plan2", "solution2", "v2", "session_reuse"}:
             return "abcard"
         if flow == "outlook":
@@ -277,6 +291,8 @@ class RegistrationEngine:
             return "自动推荐"
         if flow == "fast":
             return "极速流"
+        if flow == "playwright":
+            return "Playwright / 浏览器态优先收尾"
         if flow == "abcard":
             return "方案二 / Session 复用直取"
         return "方案一 / 原生闭环收尾"
@@ -314,6 +330,245 @@ class RegistrationEngine:
                 return "abcard", "自动推荐 -> 方案二 / Session 复用直取"
             return "native", "自动推荐 -> 方案一 / 原生闭环收尾"
         return configured_flow, self._get_registration_scheme_label(configured_flow)
+
+    @staticmethod
+    def _merge_result_metadata(result: RegistrationResult, **extra: Any) -> None:
+        metadata = dict(result.metadata or {})
+        metadata.update({k: v for k, v in extra.items() if v is not None})
+        result.metadata = metadata
+
+    def _record_playwright_diagnostics(
+        self,
+        result: RegistrationResult,
+        *,
+        stage: str,
+        strategy: str = "",
+        browser_probe: Optional[Dict[str, Any]] = None,
+        failure_reason: str = "",
+        callback_url: str = "",
+        current_url: str = "",
+        callback_candidate: str = "",
+        used_native_backfill: Optional[bool] = None,
+        used_browser_retry: Optional[bool] = None,
+        used_signin_bridge: Optional[bool] = None,
+        artifact: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        diagnostics = dict((result.metadata or {}).get("playwright_diagnostics") or {})
+        diagnostics.update(
+            {
+                "stage": str(stage or "").strip(),
+                "strategy": str(strategy or diagnostics.get("strategy") or "").strip(),
+                "failure_reason": str(failure_reason or diagnostics.get("failure_reason") or "").strip(),
+                "callback_url": str(callback_url or diagnostics.get("callback_url") or "").strip(),
+                "current_url": str(current_url or diagnostics.get("current_url") or "").strip(),
+                "callback_candidate": str(callback_candidate or diagnostics.get("callback_candidate") or "").strip(),
+                "has_session_token": bool(result.session_token),
+                "has_access_token": bool(result.access_token),
+                "has_refresh_token": bool(result.refresh_token),
+            }
+        )
+        if used_native_backfill is not None:
+            diagnostics["used_native_backfill"] = bool(used_native_backfill)
+        if used_browser_retry is not None:
+            diagnostics["used_browser_retry"] = bool(used_browser_retry)
+        if used_signin_bridge is not None:
+            diagnostics["used_signin_bridge"] = bool(used_signin_bridge)
+        if browser_probe:
+            diagnostics["browser_probe"] = dict(browser_probe)
+        if artifact:
+            diagnostics["artifact"] = dict(artifact)
+        self._merge_result_metadata(result, playwright_diagnostics=diagnostics)
+
+    def _build_playwright_failure_screenshot_path(self, stage: str) -> str:
+        if not self.playwright_failure_screenshot_enabled:
+            return ""
+        return str(build_failure_screenshot_path(task_uuid=self.task_uuid or "", stage=stage))
+
+    def _should_try_playwright_guest_recovery(self, result: RegistrationResult) -> bool:
+        diagnostics = dict((result.metadata or {}).get("playwright_diagnostics") or {})
+        probe = diagnostics.get("browser_probe") if isinstance(diagnostics.get("browser_probe"), dict) else {}
+        page_state = str(probe.get("page_state") or "").strip().lower()
+        current_url = str(diagnostics.get("current_url") or probe.get("chatgpt_url") or "").strip().lower()
+        callback_candidate = str(diagnostics.get("callback_candidate") or "").strip().lower()
+        create_account_continue = str(self._create_account_continue_url or "").strip().lower()
+        return (
+            (not result.access_token)
+            and (page_state in {"guest_home", "unknown", "challenge_page"})
+            and (
+                ("auth.openai.com/add-phone" in callback_candidate)
+                or ("auth.openai.com/add-phone" in create_account_continue)
+                or ("__cf_chl_rt_tk=" in current_url)
+            )
+        )
+
+    def _attempt_playwright_guest_recovery(self, result: RegistrationResult) -> bool:
+        self._log("Playwright 模式命中 guest/challenge 落点，尝试 callback 稳定化与会话桥接恢复 ...", "warning")
+        callback_continue = str(self._last_validate_otp_continue_url or "").strip()
+        if "/api/auth/callback/openai" in callback_continue:
+            if self._stabilize_chatgpt_callback_session(callback_continue, result):
+                return True
+        self._warmup_chatgpt_session()
+        if self._capture_auth_session_tokens(result, access_hint=result.access_token):
+            return True
+        # 若已落在 guest_home 且无 callback，直接尝试 signin/openai 生成新的 auth_url，再跟随重定向补会话。
+        if self._bootstrap_chatgpt_signin_for_session(result):
+            if result.access_token or self._capture_access_token_light(result):
+                return True
+        # 对 guest_home 再补一次 callback -> home 稳定化，避免 signin/openai 仍停在未登录首页。
+        fallback_callback = str(self._last_validate_otp_continue_url or self._create_account_continue_url or "").strip()
+        if "/api/auth/callback/openai" in fallback_callback:
+            if self._stabilize_chatgpt_callback_session(fallback_callback, result):
+                return True
+        self._warmup_chatgpt_session()
+        self._capture_auth_session_tokens(result, access_hint=result.access_token)
+        if result.access_token:
+            return True
+        return bool(result.access_token)
+
+    def _attempt_otp_page_session_fallback(self, result: RegistrationResult) -> bool:
+        self._log("会话桥接 OTP 页短窗未命中，尝试无验证码补会话兜底 ...", "warning")
+        before_cookie_text = self._dump_session_cookies()
+        self._warmup_chatgpt_session()
+        if self._capture_auth_session_tokens(result, access_hint=result.access_token):
+            return True
+        if self._bootstrap_chatgpt_signin_for_session(result):
+            if result.access_token or self._capture_access_token_light(result):
+                return True
+        after_cookie_text = self._dump_session_cookies()
+        if after_cookie_text != before_cookie_text:
+            self._capture_auth_session_tokens(result, access_hint=result.access_token)
+            if result.access_token:
+                return True
+        return bool(result.access_token)
+
+    def _complete_token_exchange_playwright(self, result: RegistrationResult) -> bool:
+        """
+        Playwright 独立模式：优先复用当前会话 + 浏览器态侧信道提取 session/access，
+        再按原生链路补齐 OAuth token。
+        """
+        self._log("Playwright 模式：优先走浏览器态侧信道提取 session/access ...")
+        self._record_playwright_diagnostics(
+            result,
+            stage="start",
+            strategy="browser_first",
+            callback_candidate=str(self._last_validate_otp_continue_url or self._create_account_continue_url or ""),
+        )
+
+        result.password = self.password or ""
+        result.source = "login" if self._is_existing_account else "register"
+        result.device_id = result.device_id or str(self.device_id or "")
+
+        if not result.account_id:
+            result.account_id = str(self._create_account_account_id or "").strip()
+        if not result.workspace_id:
+            result.workspace_id = str(self._create_account_workspace_id or "").strip()
+        if not result.refresh_token:
+            result.refresh_token = str(self._create_account_refresh_token or "").strip()
+
+        self._warmup_chatgpt_session()
+        self._capture_auth_session_tokens(result, access_hint=result.access_token)
+        if not result.access_token:
+            self._record_playwright_diagnostics(result, stage="light_session_probe")
+            self._capture_access_token_light(result)
+
+        if not result.access_token:
+            self._record_playwright_diagnostics(result, stage="browser_side_channel")
+            browser_ok = self._try_browser_side_channel_session_capture(result)
+            browser_probe = None
+            if isinstance(result.metadata, dict):
+                browser_probe = result.metadata.get("browser_probe")
+            self._record_playwright_diagnostics(
+                result,
+                stage="browser_side_channel_ok" if browser_ok else "browser_side_channel_miss",
+                browser_probe=browser_probe if isinstance(browser_probe, dict) else None,
+                current_url=str((browser_probe or {}).get("chatgpt_url") or "") if isinstance(browser_probe, dict) else "",
+            )
+
+        if not result.access_token:
+            self._log("Playwright 模式首轮未命中 access_token，回退原生 token 抓取补齐", "warning")
+            self._record_playwright_diagnostics(
+                result,
+                stage="native_backfill",
+                failure_reason="browser_capture_miss",
+                used_native_backfill=True,
+            )
+
+        native_ok = self._capture_native_core_tokens(result)
+        self._record_playwright_diagnostics(
+            result,
+            stage="native_backfill_ok" if native_ok else "native_backfill_miss",
+            used_native_backfill=True,
+        )
+        if (not result.access_token) and self._should_try_playwright_guest_recovery(result):
+            self._record_playwright_diagnostics(result, stage="guest_recovery")
+            if self._attempt_playwright_guest_recovery(result):
+                self._record_playwright_diagnostics(result, stage="guest_recovery_ok")
+                native_ok = True
+            else:
+                self._record_playwright_diagnostics(result, stage="guest_recovery_miss", failure_reason="access_token_missing")
+        if not native_ok:
+            if not result.access_token:
+                self._record_playwright_diagnostics(result, stage="failed", failure_reason="access_token_missing")
+                result.error_message = "Playwright 模式未获取到 access_token"
+                return False
+
+        if not result.session_token:
+            self._record_playwright_diagnostics(result, stage="finalize_session_capture")
+            self._finalize_session_capture(result, strict=False)
+        if not result.session_token:
+            self._record_playwright_diagnostics(result, stage="browser_session_retry")
+            browser_retry_ok = self._try_browser_side_channel_session_capture(result)
+            browser_probe = None
+            if isinstance(result.metadata, dict):
+                browser_probe = result.metadata.get("browser_probe")
+            self._record_playwright_diagnostics(
+                result,
+                stage="browser_session_retry_ok" if browser_retry_ok else "browser_session_retry_miss",
+                browser_probe=browser_probe if isinstance(browser_probe, dict) else None,
+                current_url=str((browser_probe or {}).get("chatgpt_url") or "") if isinstance(browser_probe, dict) else "",
+                used_browser_retry=True,
+            )
+        if not result.session_token:
+            self._record_playwright_diagnostics(result, stage="signin_bridge", used_signin_bridge=True)
+            self._bootstrap_chatgpt_signin_for_session(result)
+        if not result.session_token:
+            result.session_token = self._extract_session_token_from_cookie_text(self._dump_session_cookies())
+
+        if result.session_token and (not result.refresh_token):
+            self._refresh_tokens_via_session_token(result)
+
+        if not result.account_id and result.access_token:
+            result.account_id = self._extract_account_id_from_access_token(result.access_token)
+        if not result.device_id:
+            result.device_id = str(self.device_id or self.session.cookies.get("oai-did") or "")
+
+        if not result.access_token:
+            self._record_playwright_diagnostics(result, stage="failed", failure_reason="access_token_missing")
+            if self._should_try_playwright_guest_recovery(result):
+                self._record_playwright_diagnostics(result, stage="guest_recovery_final")
+                if self._attempt_playwright_guest_recovery(result):
+                    self._record_playwright_diagnostics(result, stage="guest_recovery_final_ok")
+                else:
+                    self._record_playwright_diagnostics(result, stage="guest_recovery_final_miss", failure_reason="access_token_missing")
+            if result.access_token:
+                self._log("Playwright guest/challenge 恢复后已补到 access_token", "warning")
+            else:
+                result.error_message = "Playwright 模式未获取到 access_token"
+                return False
+        if not result.session_token:
+            if not self._ensure_session_token_strict(result, max_rounds=2):
+                self._record_playwright_diagnostics(result, stage="failed", failure_reason="session_token_missing")
+                result.error_message = "Playwright 模式未获取到 session_token"
+                return False
+
+        self._record_playwright_diagnostics(
+            result,
+            stage="completed",
+            callback_url=str(self._last_validate_otp_continue_url or ""),
+            callback_candidate=str(self._last_validate_otp_continue_url or self._create_account_continue_url or ""),
+        )
+        self._log("Playwright 模式收尾完成：已拿到可用 session/access")
+        return True
 
     def _is_cancelled(self) -> bool:
         try:
@@ -1437,9 +1692,16 @@ class RegistrationEngine:
                 )
                 return False
 
-            if not self._verify_email_otp_with_retry(stage_label="会话桥接登录验证码", max_attempts=3):
-                self._log("会话桥接自动登录验证码校验失败", "warning")
-                return False
+            # 会话桥接登录 OTP 与注册 OTP 不是同一封邮件，记录新的发送时间，避免重复消费旧验证码。
+            bridge_otp_sent_at = time.time()
+            if not self._verify_email_otp_with_retry(
+                stage_label="会话桥接登录验证码",
+                max_attempts=2,
+                fetch_timeout=30,
+                otp_sent_at=bridge_otp_sent_at,
+            ):
+                self._log("会话桥接自动登录验证码校验失败（新 OTP 短窗未命中）", "warning")
+                return self._attempt_otp_page_session_fallback(result)
 
             callback_continue = str(self._last_validate_otp_continue_url or "").strip()
             if "/api/auth/callback/openai" in callback_continue:
@@ -2798,20 +3060,32 @@ class RegistrationEngine:
                 proxy_url=str(self.proxy_url or ""),
                 timeout_seconds=45,
                 fingerprint_profile=self.fingerprint_profile,
+                failure_screenshot_path=self._build_playwright_failure_screenshot_path("browser-capture"),
             )
             if not capture.get("success"):
                 probe = capture.get("probe") or {}
+                artifact = None
+                failure_screenshot_path = str(capture.get("failure_screenshot_path") or "").strip()
+                if failure_screenshot_path:
+                    artifact = artifact_to_metadata(Path(failure_screenshot_path))
                 if probe:
                     if not isinstance(result.metadata, dict):
                         result.metadata = {}
                     result.metadata["browser_probe"] = probe
                     self._log(f"浏览器态探针: {json.dumps(probe, ensure_ascii=False)[:600]}", "warning")
+                if artifact:
+                    self._record_playwright_diagnostics(result, stage="artifact_captured", artifact=artifact)
                 self._log(f"浏览器态侧信道提取失败: {capture.get('error') or capture.get('stage')}", "warning")
                 return False
 
             session_data = capture.get("session") or {}
             access_token = str(capture.get("access_token") or session_data.get("accessToken") or "").strip()
             session_token = str(capture.get("session_token") or session_data.get("sessionToken") or "").strip()
+            probe = capture.get("probe") or {}
+            if probe:
+                if not isinstance(result.metadata, dict):
+                    result.metadata = {}
+                result.metadata["browser_probe"] = probe
             if session_token:
                 result.session_token = session_token
                 self.session_token = session_token
@@ -3248,7 +3522,7 @@ class RegistrationEngine:
             self._log(f"发送验证码失败: {e}", "error")
             return False
 
-    def _get_verification_code(self, timeout: Optional[int] = None) -> Optional[str]:
+    def _get_verification_code(self, timeout: Optional[int] = None, otp_sent_at: Optional[float] = None) -> Optional[str]:
         """获取验证码"""
         try:
             self._raise_if_cancelled()
@@ -3262,7 +3536,7 @@ class RegistrationEngine:
                 email_id=email_id,
                 timeout=fetch_timeout,
                 pattern=OTP_CODE_PATTERN,
-                otp_sent_at=self._otp_sent_at,
+                otp_sent_at=otp_sent_at if otp_sent_at is not None else self._otp_sent_at,
             )
 
             if code:
@@ -3366,6 +3640,7 @@ class RegistrationEngine:
         max_attempts: int = 3,
         fetch_timeout: Optional[int] = None,
         attempted_codes: Optional[set[str]] = None,
+        otp_sent_at: Optional[float] = None,
     ) -> bool:
         """
         获取并校验验证码（带重试）。
@@ -3377,11 +3652,7 @@ class RegistrationEngine:
         if attempted_codes is None:
             attempted_codes = set()
         for attempt in range(1, max_attempts + 1):
-            code = (
-                self._get_verification_code(timeout=fetch_timeout)
-                if fetch_timeout
-                else self._get_verification_code()
-            )
+            code = self._get_verification_code(timeout=fetch_timeout, otp_sent_at=otp_sent_at)
             if not code:
                 if attempt < max_attempts:
                     self._log(
@@ -4043,6 +4314,8 @@ class RegistrationEngine:
                         return result
                     if effective_entry_flow == "outlook":
                         self._log("注册入口链路: Outlook（迁移版，按朋友版 Outlook 主流程收尾）")
+                elif effective_entry_flow == "playwright":
+                    self._log("注册入口链路: Playwright（浏览器态优先收尾）")
                 else:
                     self._log("注册入口链路: ABCard（方案二：新账号不重登，直接抓取会话）")
 
@@ -4051,6 +4324,9 @@ class RegistrationEngine:
                     return result
             elif effective_entry_flow == "outlook":
                 if not self._complete_token_exchange_outlook(result):
+                    return result
+            elif effective_entry_flow == "playwright":
+                if not self._complete_token_exchange_playwright(result):
                     return result
             else:
                 use_abcard_entry = (effective_entry_flow == "abcard") and (not self._is_existing_account)
@@ -4092,6 +4368,7 @@ class RegistrationEngine:
                 "refresh_token_pending": not bool(result.refresh_token),
                 # 对齐 K:\1\2：原生入口允许无 session_token 成功，但会标记待补。
                 "session_token_pending": (effective_entry_flow == "native") and (not bool(result.session_token)),
+                "playwright_mode": (effective_entry_flow == "playwright"),
             }
             export_account = Account(
                 email=result.email,

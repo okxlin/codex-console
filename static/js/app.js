@@ -49,6 +49,9 @@ let batchWsReconnectAttempts = 0;
 let wsManualClose = false;
 let batchWsManualClose = false;
 let autoMonitorLastLogIndex = 0;
+let historyTasks = [];
+let selectedHistoryTaskUuid = null;
+let inspectingHistoryTask = false;
 
 const WS_RECONNECT_BASE_DELAY = 1000;
 const WS_RECONNECT_MAX_DELAY = 10000;
@@ -77,9 +80,30 @@ const elements = {
     taskStatus: document.getElementById('task-status'),
     taskService: document.getElementById('task-service'),
     taskScheme: document.getElementById('task-scheme'),
+    playwrightDiagnostics: document.getElementById('playwright-diagnostics'),
+    playwrightStage: document.getElementById('playwright-stage'),
+    playwrightStrategy: document.getElementById('playwright-strategy'),
+    playwrightFailure: document.getElementById('playwright-failure'),
+    playwrightDiagnosis: document.getElementById('playwright-diagnosis'),
+    playwrightDiagnosisHint: document.getElementById('playwright-diagnosis-hint'),
+    playwrightAction: document.getElementById('playwright-action'),
+    playwrightStrategyFlags: document.getElementById('playwright-strategy-flags'),
+    playwrightPostFailureStrategy: document.getElementById('playwright-post-failure-strategy'),
+    playwrightNextRunPolicy: document.getElementById('playwright-next-run-policy'),
+    playwrightTokens: document.getElementById('playwright-tokens'),
+    playwrightBrowserProbe: document.getElementById('playwright-browser-probe'),
+    playwrightPageState: document.getElementById('playwright-page-state'),
+    playwrightPageTitle: document.getElementById('playwright-page-title'),
+    playwrightIpify: document.getElementById('playwright-ipify'),
+    playwrightRefresh: document.getElementById('playwright-refresh'),
+    playwrightCallback: document.getElementById('playwright-callback'),
+    playwrightCurrentUrl: document.getElementById('playwright-current-url'),
+    playwrightPath: document.getElementById('playwright-path'),
+    playwrightArtifact: document.getElementById('playwright-artifact'),
     taskStatusBadge: document.getElementById('task-status-badge'),
     autoMonitorStatusBadge: document.getElementById('auto-monitor-status-badge'),
     autoMonitorLastChecked: document.getElementById('auto-monitor-last-checked'),
+    autoMonitorPlaywrightSummary: document.getElementById('auto-monitor-playwright-summary'),
     taskLastChecked: document.getElementById('task-last-checked'),
     taskInventory: document.getElementById('task-inventory'),
     // 批量状态
@@ -92,12 +116,27 @@ const elements = {
     // 已注册账号
     recentAccountsTable: document.getElementById('recent-accounts-table'),
     refreshAccountsBtn: document.getElementById('refresh-accounts-btn'),
+    historyTasksTable: document.getElementById('history-tasks-table'),
+    historyTaskFilter: document.getElementById('history-task-filter'),
+    refreshHistoryBtn: document.getElementById('refresh-history-btn'),
+    restoreActiveTaskBtn: document.getElementById('restore-active-task-btn'),
+    artifactPreviewOverlay: document.getElementById('artifact-preview-overlay'),
+    artifactPreviewImage: document.getElementById('artifact-preview-image'),
+    artifactPreviewMeta: document.getElementById('artifact-preview-meta'),
+    artifactPreviewDownload: document.getElementById('artifact-preview-download'),
+    artifactPreviewClose: document.getElementById('artifact-preview-close'),
     // 今日统计
     todayStatsTotal: document.getElementById('today-stats-total'),
     todayStatsSuccess: document.getElementById('today-stats-success'),
     todayStatsFailed: document.getElementById('today-stats-failed'),
     todayStatsRate: document.getElementById('today-stats-rate'),
     todayStatsReset: document.getElementById('today-stats-reset'),
+    pwStatsSamples: document.getElementById('pw-stats-samples'),
+    pwStatsRotate: document.getElementById('pw-stats-rotate'),
+    pwStatsFingerprint: document.getElementById('pw-stats-fingerprint'),
+    pwStatsThrottle: document.getElementById('pw-stats-throttle'),
+    pwStatsDiagnosis: document.getElementById('pw-stats-diagnosis'),
+    pwStatsAlerts: document.getElementById('pw-stats-alerts'),
     // Outlook 批量注册
     outlookBatchSection: document.getElementById('outlook-batch-section'),
     outlookAccountsContainer: document.getElementById('outlook-accounts-container'),
@@ -144,6 +183,7 @@ document.addEventListener('DOMContentLoaded', () => {
     handleModeChange({ target: elements.regMode });
     loadAvailableServices();
     loadRecentAccounts();
+    loadHistoryTasks();
     loadAutoRegistrationSettings();
     loadAutoRegistrationCpaOptions();
     startAccountsPolling();
@@ -269,6 +309,43 @@ function initEventListeners() {
     elements.refreshAccountsBtn.addEventListener('click', () => {
         loadRecentAccounts();
         toast.info('已刷新');
+    });
+
+    if (elements.refreshHistoryBtn) {
+        elements.refreshHistoryBtn.addEventListener('click', async () => {
+            await loadHistoryTasks();
+            toast.info('历史任务已刷新');
+        });
+    }
+
+    if (elements.historyTaskFilter) {
+        elements.historyTaskFilter.addEventListener('change', () => {
+            renderHistoryTasks();
+        });
+    }
+
+    if (elements.restoreActiveTaskBtn) {
+        elements.restoreActiveTaskBtn.addEventListener('click', async () => {
+            await restoreCurrentActiveTaskView();
+        });
+    }
+
+    if (elements.artifactPreviewClose) {
+        elements.artifactPreviewClose.addEventListener('click', closeArtifactPreview);
+    }
+
+    if (elements.artifactPreviewOverlay) {
+        elements.artifactPreviewOverlay.addEventListener('click', (event) => {
+            if (event.target === elements.artifactPreviewOverlay) {
+                closeArtifactPreview();
+            }
+        });
+    }
+
+    document.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape') {
+            closeArtifactPreview();
+        }
     });
 
     // 并发模式切换
@@ -1186,6 +1263,7 @@ function startLogPolling(taskUuid) {
             if (elements.taskScheme && data.effective_scheme) {
                 elements.taskScheme.textContent = data.effective_scheme;
             }
+            renderPlaywrightDiagnostics(data.playwright);
 
             // 添加新日志
             const logs = data.logs || [];
@@ -1275,6 +1353,21 @@ function stopBatchPolling() {
 }
 
 // 显示任务状态
+function getTaskPlaywrightDiagnostics(task) {
+    const metadata = task?.result?.metadata || {};
+    const diagnostics = metadata?.playwright_diagnostics;
+    const summary = metadata?.playwright_diagnosis_summary;
+
+    if (summary && typeof summary === 'object') {
+        return {
+            ...(diagnostics && typeof diagnostics === 'object' ? diagnostics : {}),
+            ...summary,
+        };
+    }
+
+    return diagnostics && typeof diagnostics === 'object' ? diagnostics : null;
+}
+
 function showTaskStatus(task) {
     elements.taskStatusRow.style.display = 'grid';
     elements.batchProgressSection.style.display = 'none';
@@ -1290,6 +1383,139 @@ function showTaskStatus(task) {
     }
     if (elements.taskInventory) {
         elements.taskInventory.textContent = '-';
+    }
+    renderPlaywrightDiagnostics(getTaskPlaywrightDiagnostics(task), task);
+}
+
+function formatPlaywrightProbe(browserProbe) {
+    if (!browserProbe || typeof browserProbe !== 'object') return '-';
+    const parts = [];
+    if (browserProbe.method) parts.push(String(browserProbe.method));
+    if (browserProbe.hit !== undefined) parts.push(browserProbe.hit ? '命中' : '未命中');
+    if (browserProbe.source) parts.push(String(browserProbe.source));
+    return parts.length ? parts.join(' / ') : '-';
+}
+
+function formatPlaywrightPath(diagnostics) {
+    if (!diagnostics || typeof diagnostics !== 'object') return '-';
+    const parts = [];
+    if (diagnostics.used_native_backfill) parts.push('native_backfill');
+    if (diagnostics.used_browser_retry) parts.push('browser_retry');
+    if (diagnostics.used_signin_bridge) parts.push('signin_bridge');
+    return parts.length ? parts.join(' -> ') : 'browser_first';
+}
+
+function renderPlaywrightDiagnostics(diagnostics, taskContext = null) {
+    if (!elements.playwrightDiagnostics) return;
+    if (!diagnostics || typeof diagnostics !== 'object') {
+        elements.playwrightDiagnostics.classList.remove('visible');
+        if (elements.playwrightStage) elements.playwrightStage.textContent = '-';
+        if (elements.playwrightStrategy) elements.playwrightStrategy.textContent = '-';
+        if (elements.playwrightFailure) elements.playwrightFailure.textContent = '-';
+        if (elements.playwrightDiagnosis) elements.playwrightDiagnosis.textContent = '-';
+        if (elements.playwrightDiagnosisHint) elements.playwrightDiagnosisHint.textContent = '-';
+        if (elements.playwrightAction) elements.playwrightAction.textContent = '-';
+        if (elements.playwrightStrategyFlags) elements.playwrightStrategyFlags.textContent = '-';
+        if (elements.playwrightPostFailureStrategy) elements.playwrightPostFailureStrategy.textContent = '-';
+        if (elements.playwrightNextRunPolicy) elements.playwrightNextRunPolicy.textContent = '-';
+        if (elements.playwrightTokens) elements.playwrightTokens.textContent = '-';
+        if (elements.playwrightBrowserProbe) elements.playwrightBrowserProbe.textContent = '-';
+        if (elements.playwrightPageState) elements.playwrightPageState.textContent = '-';
+        if (elements.playwrightPageTitle) elements.playwrightPageTitle.textContent = '-';
+        if (elements.playwrightIpify) elements.playwrightIpify.textContent = '-';
+        if (elements.playwrightRefresh) elements.playwrightRefresh.textContent = '-';
+        if (elements.playwrightCallback) elements.playwrightCallback.textContent = '-';
+        if (elements.playwrightCurrentUrl) elements.playwrightCurrentUrl.textContent = '-';
+        if (elements.playwrightPath) elements.playwrightPath.textContent = '-';
+        if (elements.playwrightArtifact) elements.playwrightArtifact.textContent = '-';
+        return;
+    }
+
+    const hasAccess = !!diagnostics.has_access_token;
+    const hasSession = !!diagnostics.has_session_token;
+    const hasRefresh = !!diagnostics.has_refresh_token;
+
+    elements.playwrightDiagnostics.classList.add('visible');
+    if (elements.playwrightStage) elements.playwrightStage.textContent = diagnostics.stage || '-';
+    if (elements.playwrightStrategy) elements.playwrightStrategy.textContent = diagnostics.strategy || '-';
+    if (elements.playwrightFailure) elements.playwrightFailure.textContent = diagnostics.failure_reason || '-';
+    if (elements.playwrightDiagnosis) {
+        elements.playwrightDiagnosis.textContent = diagnostics.diagnosis_label || diagnostics.diagnosis_category || '-';
+    }
+    if (elements.playwrightDiagnosisHint) elements.playwrightDiagnosisHint.textContent = diagnostics.diagnosis_hint || '-';
+    if (elements.playwrightAction) elements.playwrightAction.textContent = diagnostics.recommended_action_hint || diagnostics.recommended_action || '-';
+    if (elements.playwrightStrategyFlags) {
+        const flags = diagnostics.strategy_flags || {};
+        const labels = [];
+        if (flags.safe_retry_same_env) labels.push('可原环境轻重试');
+        if (flags.should_rotate_proxy) labels.push('建议换代理');
+        if (flags.prefer_token_only_retry) labels.push('优先仅重试 Token');
+        if (flags.prefer_session_only_retry) labels.push('优先仅补 Session');
+        if (flags.needs_manual_review) labels.push('建议人工复核');
+        elements.playwrightStrategyFlags.textContent = labels.length ? labels.join(' / ') : '-';
+    }
+    if (elements.playwrightPostFailureStrategy) {
+        const strategy = diagnostics.post_failure_strategy || {};
+        const parts = [];
+        if (strategy.retry_scope) parts.push(`scope=${strategy.retry_scope}`);
+        if (strategy.should_rotate_proxy) parts.push('rotate_proxy');
+        if (strategy.safe_retry_same_env) parts.push('same_env_ok');
+        if (strategy.needs_manual_review) parts.push('manual_review');
+        elements.playwrightPostFailureStrategy.textContent = parts.length ? parts.join(' / ') : '-';
+    }
+    if (elements.playwrightNextRunPolicy) {
+        const policy = diagnostics.next_run_policy || {};
+        const labels = [];
+        if (policy.fresh_browser_context) labels.push('fresh_context');
+        if (policy.rotate_proxy_before_retry) labels.push('rotate_proxy');
+        if (policy.prefer_fresh_fingerprint) labels.push('fresh_fingerprint');
+        if (policy.isolate_task_cookies) labels.push('isolated_cookies');
+        if (policy.reuse_browser_storage === false) labels.push('no_storage_reuse');
+        elements.playwrightNextRunPolicy.textContent = labels.length ? labels.join(' / ') : '-';
+    }
+    if (elements.playwrightTokens) {
+        elements.playwrightTokens.textContent = `${hasAccess ? 'Access:有' : 'Access:无'} / ${hasSession ? 'Session:有' : 'Session:无'}`;
+    }
+    if (elements.playwrightBrowserProbe) {
+        elements.playwrightBrowserProbe.textContent = formatPlaywrightProbe(diagnostics.browser_probe);
+    }
+    if (elements.playwrightPageState) {
+        elements.playwrightPageState.textContent = diagnostics.browser_probe?.page_state || '-';
+    }
+    if (elements.playwrightPageTitle) {
+        elements.playwrightPageTitle.textContent = diagnostics.browser_probe?.chatgpt_title || '-';
+    }
+    if (elements.playwrightIpify) {
+        elements.playwrightIpify.textContent = diagnostics.browser_probe?.ipify_before || diagnostics.browser_probe?.proxy || '-';
+    }
+    if (elements.playwrightRefresh) {
+        elements.playwrightRefresh.textContent = hasRefresh ? '已补齐' : '待补/无';
+    }
+    if (elements.playwrightCallback) {
+        elements.playwrightCallback.textContent = diagnostics.callback_url || diagnostics.callback_candidate || '-';
+    }
+    if (elements.playwrightCurrentUrl) {
+        elements.playwrightCurrentUrl.textContent = diagnostics.current_url || '-';
+    }
+    if (elements.playwrightPath) {
+        elements.playwrightPath.textContent = formatPlaywrightPath(diagnostics);
+    }
+    if (elements.playwrightArtifact) {
+        const artifact = diagnostics.artifact;
+        if (artifact && artifact.path) {
+            const sizeKb = Math.round((Number(artifact.size_bytes || 0) / 1024) || 0);
+            const href = getArtifactHref(artifact);
+            elements.playwrightArtifact.innerHTML = `<a href="#" class="artifact-preview-link" id="playwright-artifact-preview">预览</a> / <a href="${href}" target="_blank" rel="noopener noreferrer">下载</a> <span style="color: var(--text-muted);">(${sizeKb} KB)</span>`;
+            const previewLink = document.getElementById('playwright-artifact-preview');
+            if (previewLink) {
+                previewLink.addEventListener('click', (event) => {
+                    event.preventDefault();
+                    openArtifactPreview(artifact, taskContext || currentTask);
+                });
+            }
+        } else {
+            elements.playwrightArtifact.textContent = '-';
+        }
     }
 }
 
@@ -1345,6 +1571,21 @@ function formatAutoMonitorTimestamp(value) {
     });
 }
 
+function formatDateTime(value) {
+    if (!value) return '-';
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return value;
+    return date.toLocaleString('zh-CN', {
+        hour12: false,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit',
+        second: '2-digit'
+    });
+}
+
 function updateAutoMonitorHeader(status, lastCheckedAt) {
     if (!elements.autoMonitorStatusBadge || !elements.autoMonitorLastChecked) return;
 
@@ -1372,6 +1613,23 @@ function updateAutoMonitorHeader(status, lastCheckedAt) {
     elements.autoMonitorLastChecked.textContent = `最近检查: ${formatAutoMonitorTimestamp(lastCheckedAt)}`;
 }
 
+function renderAutoMonitorPlaywrightSummary(stats, alerts) {
+    if (!elements.autoMonitorPlaywrightSummary) return;
+    if (!isAutoMode) {
+        elements.autoMonitorPlaywrightSummary.style.display = 'none';
+        elements.autoMonitorPlaywrightSummary.textContent = '';
+        return;
+    }
+    const top = Array.isArray(stats?.top_diagnosis) ? stats.top_diagnosis.slice(0, 3) : [];
+    const alertMessages = Array.isArray(alerts?.messages) ? alerts.messages : [];
+    const diagnosisText = top.length
+        ? `高频诊断: ${top.map(item => `${item.label}(${item.count})`).join(' / ')}`
+        : '暂无 Playwright 诊断样本';
+    const alertText = alertMessages.length ? `告警: ${alertMessages.join(' / ')}` : '暂无风险告警';
+    elements.autoMonitorPlaywrightSummary.style.display = 'block';
+    elements.autoMonitorPlaywrightSummary.textContent = `${diagnosisText}；${alertText}`;
+}
+
 async function pollAutoRegistrationStatus() {
     try {
         const data = await api.get('/registration/auto-monitor');
@@ -1391,6 +1649,7 @@ async function pollAutoRegistrationStatus() {
             ? 'cancelling'
             : (data.status || 'pending');
         updateAutoMonitorHeader(effectiveStatus, data.last_checked_at);
+        renderAutoMonitorPlaywrightSummary(data.playwright || {}, data.playwright_alerts || {});
         updateTaskStatus(effectiveStatus);
 
         const logs = data.logs || [];
@@ -1418,6 +1677,7 @@ async function pollAutoRegistrationStatus() {
     } catch (error) {
         console.error('加载自动注册监控失败:', error);
         updateAutoMonitorHeader('error', null);
+        renderAutoMonitorPlaywrightSummary({}, {});
         elements.taskStatus.textContent = '自动注册监控获取失败';
         addLog('warning', '[警告] 自动注册监控获取失败');
     }
@@ -1520,6 +1780,279 @@ async function loadRecentAccounts() {
     }
 }
 
+function formatHistoryTaskSummary(task) {
+    const result = task?.result || {};
+    const email = result?.email || task?.result?.email || '-';
+    const metadata = result?.metadata || {};
+    const diagnostics = getTaskPlaywrightDiagnostics(task);
+    const scheme = task?.effective_scheme || metadata?.registration_scheme_label_effective || metadata?.registration_scheme || '-';
+    const diagnosis = diagnostics?.diagnosis_label || diagnostics?.diagnosis_category || '';
+    const failureReason = diagnostics?.failure_reason || task?.error_message || '';
+    const summaryParts = [email, scheme].filter(Boolean);
+    if (diagnosis) summaryParts.push(diagnosis);
+    else if (failureReason) summaryParts.push(failureReason);
+    return summaryParts.join(' / ');
+}
+
+function getHistoryTaskDiagnosis(task) {
+    const diagnostics = getTaskPlaywrightDiagnostics(task);
+    if (diagnostics && typeof diagnostics === 'object') {
+        return diagnostics.diagnosis_label || diagnostics.diagnosis_category || diagnostics.failure_reason || '-';
+    }
+    return task?.error_message || '-';
+}
+
+function getTaskStatusBadgeClass(status) {
+    if (status === 'failed') return 'failed';
+    if (status === 'completed') return 'completed';
+    return '';
+}
+
+function formatTaskStatusText(status) {
+    const mapping = {
+        pending: '等待中',
+        running: '运行中',
+        completed: '已完成',
+        failed: '失败',
+        cancelled: '已取消',
+    };
+    return mapping[status] || status || '-';
+}
+
+function isPlaywrightFailureTask(task) {
+    const result = task?.result || {};
+    const metadata = result?.metadata || {};
+    const diagnostics = metadata?.playwright_diagnostics;
+    return task?.status === 'failed' && diagnostics && typeof diagnostics === 'object';
+}
+
+function hasPlaywrightScreenshot(task) {
+    return !!(task?.result?.metadata?.playwright_diagnostics?.artifact?.path);
+}
+
+function getPlaywrightArtifact(task) {
+    return task?.result?.metadata?.playwright_diagnostics?.artifact || null;
+}
+
+function getArtifactHref(artifact) {
+    if (!artifact?.path) return '';
+    return `/api/registration/artifacts/playwright?path=${encodeURIComponent(artifact.path)}`;
+}
+
+function openArtifactPreview(artifact, task) {
+    if (!artifact?.path || !elements.artifactPreviewOverlay || !elements.artifactPreviewImage) {
+        return;
+    }
+
+    const href = getArtifactHref(artifact);
+    const email = task?.result?.email || '-';
+    const sizeKb = Math.round((Number(artifact.size_bytes || 0) / 1024) || 0);
+    const createdAt = artifact.created_at
+        ? new Date(Number(artifact.created_at) * 1000).toLocaleString('zh-CN', { hour12: false })
+        : '-';
+
+    elements.artifactPreviewImage.src = href;
+    elements.artifactPreviewImage.alt = `${email} 的失败截图`;
+    if (elements.artifactPreviewMeta) {
+        elements.artifactPreviewMeta.textContent = `${email} / ${sizeKb} KB / ${createdAt}`;
+    }
+    if (elements.artifactPreviewDownload) {
+        elements.artifactPreviewDownload.href = href;
+    }
+
+    elements.artifactPreviewOverlay.classList.add('visible');
+    elements.artifactPreviewOverlay.setAttribute('aria-hidden', 'false');
+}
+
+function closeArtifactPreview() {
+    if (!elements.artifactPreviewOverlay) return;
+    elements.artifactPreviewOverlay.classList.remove('visible');
+    elements.artifactPreviewOverlay.setAttribute('aria-hidden', 'true');
+    if (elements.artifactPreviewImage) {
+        elements.artifactPreviewImage.removeAttribute('src');
+    }
+}
+
+function scrollToPlaywrightDiagnosticsIfVisible() {
+    if (!elements.playwrightDiagnostics) return;
+    if (!elements.playwrightDiagnostics.classList.contains('visible')) return;
+    elements.playwrightDiagnostics.scrollIntoView({ behavior: 'smooth', block: 'start' });
+}
+
+function hasSavedActiveTask() {
+    const saved = sessionStorage.getItem('activeTask');
+    if (!saved) return false;
+    try {
+        const parsed = JSON.parse(saved);
+        return !!(parsed?.mode && (parsed?.task_uuid || parsed?.batch_id || parsed?.mode === 'auto'));
+    } catch {
+        return false;
+    }
+}
+
+function updateRestoreActiveTaskButton() {
+    if (!elements.restoreActiveTaskBtn) return;
+    const canRestore = inspectingHistoryTask && hasSavedActiveTask();
+    elements.restoreActiveTaskBtn.style.display = 'inline-flex';
+    elements.restoreActiveTaskBtn.disabled = !canRestore;
+    elements.restoreActiveTaskBtn.title = canRestore
+        ? '返回当前正在运行的任务监控视图'
+        : (inspectingHistoryTask ? '当前没有可恢复的活动任务' : '先查看一条历史任务后可返回当前任务');
+}
+
+function getFilteredHistoryTasks() {
+    const filter = elements.historyTaskFilter?.value || 'all';
+    if (filter === 'failed') {
+        return historyTasks.filter(task => task.status === 'failed');
+    }
+    if (filter === 'playwright_failed') {
+        return historyTasks.filter(isPlaywrightFailureTask);
+    }
+    if (filter === 'with_screenshot') {
+        return historyTasks.filter(hasPlaywrightScreenshot);
+    }
+    return historyTasks;
+}
+
+function renderHistoryTasks() {
+    if (!elements.historyTasksTable) return;
+    const tasks = getFilteredHistoryTasks();
+
+    if (!tasks.length) {
+        elements.historyTasksTable.innerHTML = `
+            <tr>
+                <td colspan="6">
+                    <div class="empty-state" style="padding: var(--spacing-md);">
+                        <div class="empty-state-icon">🕘</div>
+                        <div class="empty-state-title">当前筛选下暂无历史任务</div>
+                    </div>
+                </td>
+            </tr>`;
+        return;
+    }
+
+    elements.historyTasksTable.innerHTML = tasks.map(task => {
+        const taskIdShort = `${task.task_uuid.substring(0, 8)}...`;
+        const completedAt = task.completed_at ? formatDateTime(task.completed_at) : '-';
+        const isActive = selectedHistoryTaskUuid === task.task_uuid;
+        const statusClass = getTaskStatusBadgeClass(task.status);
+        const summary = escapeHtml(formatHistoryTaskSummary(task));
+        const diagnosis = escapeHtml(getHistoryTaskDiagnosis(task));
+        const hasScreenshot = !!(task?.result?.metadata?.playwright_diagnostics?.artifact?.path);
+        const screenshotText = hasScreenshot
+            ? `<a href="#" class="artifact-preview-link history-artifact-preview" data-task-uuid="${task.task_uuid}">预览</a>`
+            : '无';
+        const meta = [task.proxy ? '有代理' : '直连', hasScreenshot ? '有截图' : '无截图'].join(' / ');
+        return `
+            <tr class="history-task-row ${isActive ? 'active' : ''}" data-task-uuid="${task.task_uuid}">
+                <td>
+                    <div style="font-weight: 600;">${taskIdShort}</div>
+                    <div class="history-task-meta">#${task.id}</div>
+                </td>
+                <td>
+                    <div>${summary}</div>
+                    <div class="history-task-meta">${escapeHtml(meta)}</div>
+                </td>
+                <td>${diagnosis}</td>
+                <td>${screenshotText}</td>
+                <td>
+                    <span class="history-task-badge ${statusClass}">${formatTaskStatusText(task.status)}</span>
+                </td>
+                <td>${escapeHtml(completedAt)}</td>
+            </tr>`;
+    }).join('');
+
+    elements.historyTasksTable.querySelectorAll('.history-task-row').forEach(row => {
+        row.addEventListener('click', async () => {
+            const taskUuid = row.dataset.taskUuid;
+            if (!taskUuid) return;
+            await loadHistoryTaskDetail(taskUuid);
+        });
+    });
+
+    elements.historyTasksTable.querySelectorAll('.history-artifact-preview').forEach(link => {
+        link.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            const taskUuid = link.dataset.taskUuid;
+            const task = historyTasks.find(item => item.task_uuid === taskUuid);
+            openArtifactPreview(getPlaywrightArtifact(task), task);
+        });
+    });
+}
+
+async function loadHistoryTasks() {
+    try {
+        const data = await api.get('/registration/tasks?page=1&page_size=30');
+        historyTasks = Array.isArray(data?.tasks) ? data.tasks : [];
+        renderHistoryTasks();
+        updateRestoreActiveTaskButton();
+    } catch (error) {
+        console.error('加载历史任务失败:', error);
+        if (elements.historyTasksTable) {
+            elements.historyTasksTable.innerHTML = `
+                <tr>
+                    <td colspan="6">
+                        <div class="empty-state" style="padding: var(--spacing-md);">
+                            <div class="empty-state-icon">⚠️</div>
+                            <div class="empty-state-title">加载历史任务失败</div>
+                        </div>
+                    </td>
+                </tr>`;
+        }
+    }
+}
+
+async function loadHistoryTaskDetail(taskUuid) {
+    try {
+        const data = await api.get(`/registration/tasks/${taskUuid}`);
+        selectedHistoryTaskUuid = taskUuid;
+        inspectingHistoryTask = true;
+        elements.cancelBtn.disabled = true;
+        showTaskStatus(data);
+        updateTaskStatus(data.status || 'failed');
+        elements.batchProgressSection.style.display = 'none';
+
+        const email = data?.result?.email;
+        if (email) {
+            elements.taskEmail.textContent = email;
+        }
+
+        renderHistoryTasks();
+
+        elements.consoleLog.innerHTML = '';
+        displayedLogs.clear();
+
+        if (data?.logs) {
+            const lines = String(data.logs).split('\n').filter(Boolean);
+            for (const line of lines) {
+                addLog(getLogType(line), line);
+            }
+        } else {
+            addLog('info', '[系统] 该历史任务没有可用日志');
+        }
+        updateRestoreActiveTaskButton();
+        scrollToPlaywrightDiagnosticsIfVisible();
+    } catch (error) {
+        console.error('加载任务详情失败:', error);
+        toast.error('加载任务详情失败: ' + error.message);
+    }
+}
+
+async function restoreCurrentActiveTaskView() {
+    const restored = await restoreActiveTask();
+    if (!restored) {
+        toast.warning('当前没有可恢复的活动任务');
+        updateRestoreActiveTaskButton();
+        return;
+    }
+
+    inspectingHistoryTask = false;
+    selectedHistoryTaskUuid = null;
+    renderHistoryTasks();
+    updateRestoreActiveTaskButton();
+}
+
 // 开始账号列表轮询
 function startAccountsPolling() {
     // 每30秒刷新一次账号列表
@@ -1569,11 +2102,34 @@ async function loadTodayStats(silent = true) {
         const fallbackRate = total > 0 ? (success / total) * 100 : 0;
         const rate = Number(data?.today_success_rate ?? fallbackRate);
         renderTodayStats(total, success, failed, Number.isFinite(rate) ? rate : 0);
+        renderPlaywrightStats(data?.playwright || {});
+        renderPlaywrightAlerts(data?.playwright_alerts || {});
     } catch (error) {
         console.error('加载今日统计失败:', error);
         if (!silent) {
             toast.error('加载今日统计失败');
         }
+    }
+}
+
+function renderPlaywrightAlerts(alerts) {
+    if (!elements.pwStatsAlerts) return;
+    const messages = Array.isArray(alerts?.messages) ? alerts.messages : [];
+    elements.pwStatsAlerts.textContent = messages.length
+        ? `告警：${messages.join(' / ')}`
+        : '暂无告警';
+}
+
+function renderPlaywrightStats(stats) {
+    if (elements.pwStatsSamples) elements.pwStatsSamples.textContent = String(Number(stats?.samples || 0));
+    if (elements.pwStatsRotate) elements.pwStatsRotate.textContent = String(Number(stats?.rotate_proxy_count || 0));
+    if (elements.pwStatsFingerprint) elements.pwStatsFingerprint.textContent = String(Number(stats?.fresh_fingerprint_count || 0));
+    if (elements.pwStatsThrottle) elements.pwStatsThrottle.textContent = String(Number(stats?.throttle_count || 0));
+    if (elements.pwStatsDiagnosis) {
+        const top = Array.isArray(stats?.top_diagnosis) ? stats.top_diagnosis.slice(0, 3) : [];
+        elements.pwStatsDiagnosis.textContent = top.length
+            ? `高频诊断：${top.map(item => `${item.label}(${item.count})`).join(' / ')}`
+            : '暂无 Playwright 样本';
     }
 }
 
@@ -2101,14 +2657,14 @@ function initVisibilityReconnect() {
 // 页面加载时恢复进行中的任务（处理跨页面导航后回到注册页的情况）
 async function restoreActiveTask() {
     const saved = sessionStorage.getItem('activeTask');
-    if (!saved) return;
+    if (!saved) return false;
 
     let state;
     try {
         state = JSON.parse(saved);
     } catch {
         sessionStorage.removeItem('activeTask');
-        return;
+        return false;
     }
 
     const { mode, task_uuid, batch_id, total } = state;
@@ -2119,7 +2675,7 @@ async function restoreActiveTask() {
             const data = await api.get(`/registration/tasks/${task_uuid}`);
             if (['completed', 'failed', 'cancelled'].includes(data.status)) {
                 sessionStorage.removeItem('activeTask');
-                return;
+                return false;
             }
             // 任务仍在运行，恢复状态
             currentTask = data;
@@ -2134,8 +2690,10 @@ async function restoreActiveTask() {
             updateTaskStatus(data.status);
             addLog('info', `[系统] 检测到进行中的任务，正在重连监控... (${task_uuid.substring(0, 8)})`);
             connectWebSocket(task_uuid);
+            return true;
         } catch {
             sessionStorage.removeItem('activeTask');
+            return false;
         }
     } else if ((mode === 'batch' || mode === 'outlook_batch') && batch_id) {
         // 查询批量任务是否仍在运行
@@ -2146,7 +2704,7 @@ async function restoreActiveTask() {
             const data = await api.get(endpoint);
             if (data.finished) {
                 sessionStorage.removeItem('activeTask');
-                return;
+                return false;
             }
             // 批量任务仍在运行，恢复状态
             currentBatch = { batch_id, ...data, pollingMode: mode };
@@ -2162,15 +2720,17 @@ async function restoreActiveTask() {
             updateBatchProgress(data);
             addLog('info', `[系统] 检测到进行中的批量任务，正在重连监控... (${batch_id.substring(0, 8)})`);
             connectBatchWebSocket(batch_id);
+            return true;
         } catch {
             sessionStorage.removeItem('activeTask');
+            return false;
         }
     } else if (mode === 'auto') {
         try {
             const data = await api.get('/registration/auto-monitor');
             if (!data.enabled) {
                 sessionStorage.removeItem('activeTask');
-                return;
+                return false;
             }
 
             if (elements.regMode) {
@@ -2192,10 +2752,14 @@ async function restoreActiveTask() {
             addLog('info', '[系统] 已恢复自动注册监控状态');
             await pollAutoRegistrationStatus();
             startAutoRegistrationMonitor();
+            return true;
         } catch {
             sessionStorage.removeItem('activeTask');
+            return false;
         }
     }
+
+    return false;
 }
 
 

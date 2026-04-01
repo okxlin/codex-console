@@ -6,11 +6,15 @@ import asyncio
 import logging
 import uuid
 import random
+import time
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import List, Optional, Dict, Tuple
 
 from fastapi import APIRouter, HTTPException, Query, BackgroundTasks
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
+from sqlalchemy import func, desc
 
 from ...database import crud
 from ...database.session import get_db
@@ -26,6 +30,8 @@ from ...core.auto_registration import (
     update_auto_registration_state,
 )
 from ...core.timezone_utils import utcnow_naive
+from ...core.playwright_insights import get_cached_playwright_stats, invalidate_playwright_stats_cache
+from ...core.utils import get_data_dir
 from ..task_manager import task_manager
 
 logger = logging.getLogger(__name__)
@@ -80,6 +86,25 @@ def get_proxy_for_registration(db) -> Tuple[Optional[str], Optional[int]]:
         return proxy_url, None
 
     return None, None
+
+
+def get_proxy_for_registration_with_exclusions(
+    db,
+    *,
+    excluded_proxy_urls: Optional[List[str]] = None,
+) -> Tuple[Optional[str], Optional[int]]:
+    excluded = {str(item or "").strip() for item in (excluded_proxy_urls or []) if str(item or "").strip()}
+    if not excluded:
+        return get_proxy_for_registration(db)
+
+    enabled_proxies = [proxy for proxy in crud.get_enabled_proxies(db) if str(proxy.proxy_url or "").strip() not in excluded]
+    if enabled_proxies:
+        import random
+
+        chosen = random.choice(enabled_proxies)
+        return chosen.proxy_url, chosen.id
+
+    return get_proxy_for_registration(db)
 
 
 def update_proxy_usage(db, proxy_id: Optional[int]):
@@ -226,6 +251,338 @@ def task_to_response(task: RegistrationTask) -> RegistrationTaskResponse:
     )
 
 
+def _playwright_diagnosis_label(category: str) -> str:
+    mapping = {
+        "risk_challenge": "风控挑战",
+        "not_signed_in": "未进入登录态",
+        "access_token_missing": "Access 缺失",
+        "session_token_missing": "Session 缺失",
+        "browser_capture_miss": "浏览器侧未命中",
+        "browser_ok_token_gap": "已进应用但取 Token 失败",
+        "unknown": "待进一步排查",
+    }
+    return mapping.get(str(category or "unknown"), "待进一步排查")
+
+
+def _playwright_recommended_action(category: str) -> tuple[str, str]:
+    mapping = {
+        "risk_challenge": ("rotate_proxy_and_retry", "建议更换代理/出口环境后再重试，暂不建议原环境立即连跑"),
+        "not_signed_in": ("check_session_bootstrap", "建议优先检查 cookie/session 注入与 callback 落地，再决定是否重跑整条注册"),
+        "access_token_missing": ("retry_token_capture_only", "建议优先只重试 token 提取链路，不必立即重跑完整注册"),
+        "session_token_missing": ("retry_session_backfill", "建议优先重试 session 补齐链路，重点看 browser retry 和 signin bridge"),
+        "browser_capture_miss": ("inspect_screenshot_then_retry", "建议先看失败截图确认最终页面，再决定换代理还是整条重跑"),
+        "browser_ok_token_gap": ("retry_token_capture_only", "页面已进应用态，建议优先只重试 token/session 提取链路"),
+        "unknown": ("manual_review", "建议结合截图、页面状态和日志做人工复核后再决定动作"),
+    }
+    return mapping.get(str(category or "unknown"), ("manual_review", "建议结合截图、页面状态和日志做人工复核后再决定动作"))
+
+
+def _playwright_strategy_flags(recommended_action: str) -> dict:
+    action = str(recommended_action or "manual_review").strip()
+    return {
+        "safe_retry_same_env": action in {"retry_token_capture_only", "retry_session_backfill"},
+        "should_rotate_proxy": action == "rotate_proxy_and_retry",
+        "prefer_token_only_retry": action == "retry_token_capture_only",
+        "prefer_session_only_retry": action == "retry_session_backfill",
+        "needs_manual_review": action in {"inspect_screenshot_then_retry", "manual_review", "check_session_bootstrap"},
+    }
+
+
+def _classify_playwright_diagnosis(diagnostics: dict, browser_probe_summary: Optional[dict]) -> tuple[str, str, str]:
+    diagnosis_category = "unknown"
+    diagnosis_hint = "需要结合阶段、页面状态和截图继续排查"
+    page_state = str((browser_probe_summary or {}).get("page_state") or "").strip().lower()
+    failure_reason = str(diagnostics.get("failure_reason") or "").strip().lower()
+    stage = str(diagnostics.get("stage") or "").strip().lower()
+    has_access_token = bool(diagnostics.get("has_access_token"))
+    has_session_token = bool(diagnostics.get("has_session_token"))
+
+    if page_state in {"challenge_page", "challenge", "arkose", "captcha"}:
+        diagnosis_category = "risk_challenge"
+        diagnosis_hint = "疑似命中风控挑战页，优先检查代理质量、浏览器指纹和注册频率"
+    elif page_state in {"guest_home", "logged_out_home"}:
+        diagnosis_category = "not_signed_in"
+        diagnosis_hint = "疑似未真正进入登录态，优先检查 session cookie 注入和 callback 落地情况"
+    elif failure_reason == "access_token_missing":
+        diagnosis_category = "access_token_missing"
+        diagnosis_hint = "浏览器已执行收尾，但 access_token 仍未拿到，重点看 session 接口和侧信道提取"
+    elif failure_reason == "session_token_missing":
+        diagnosis_category = "session_token_missing"
+        diagnosis_hint = "access_token 已有但 session_token 未补齐，重点看 browser retry 和 signin bridge"
+    elif stage in {"native_backfill_miss", "browser_side_channel_miss", "browser_session_retry_miss"}:
+        diagnosis_category = "browser_capture_miss"
+        diagnosis_hint = "浏览器态和回退链路都未稳定命中，可优先结合截图确认页面最终落点"
+    elif page_state in {"app_home", "workspace_home"} and (not has_access_token or not has_session_token):
+        diagnosis_category = "browser_ok_token_gap"
+        diagnosis_hint = "页面已经进入应用态，更可能是 token/session 提取链路问题而不是页面登录问题"
+
+    return diagnosis_category, _playwright_diagnosis_label(diagnosis_category), diagnosis_hint
+
+
+def _extract_playwright_summary(result: dict) -> Optional[dict]:
+    if not isinstance(result, dict):
+        return None
+    metadata = result.get("metadata")
+    if not isinstance(metadata, dict):
+        return None
+    diagnostics = metadata.get("playwright_diagnostics")
+    if not isinstance(diagnostics, dict):
+        return None
+    post_failure_strategy = metadata.get("playwright_post_failure_strategy") if isinstance(metadata.get("playwright_post_failure_strategy"), dict) else None
+    browser_probe = diagnostics.get("browser_probe") if isinstance(diagnostics.get("browser_probe"), dict) else None
+    browser_probe_summary = None
+    if browser_probe:
+        browser_probe_summary = {
+            "proxy": browser_probe.get("proxy"),
+            "ipify_before": browser_probe.get("ipify_before"),
+            "chatgpt_title": browser_probe.get("chatgpt_title"),
+            "chatgpt_url": browser_probe.get("chatgpt_url"),
+            "page_state": browser_probe.get("page_state"),
+            "chatgpt_body_hint": browser_probe.get("chatgpt_body_hint"),
+            "fingerprint_profile_id": browser_probe.get("fingerprint_profile_id"),
+            "method": browser_probe.get("method"),
+            "hit": browser_probe.get("hit"),
+            "source": browser_probe.get("source"),
+        }
+    diagnosis_category, diagnosis_label, diagnosis_hint = _classify_playwright_diagnosis(diagnostics, browser_probe_summary)
+    recommended_action, recommended_action_hint = _playwright_recommended_action(diagnosis_category)
+    metadata = result.get("metadata") if isinstance(result, dict) else {}
+    proxy_used = str((metadata or {}).get("proxy_used") or "").strip() if isinstance(metadata, dict) else ""
+    if not proxy_used and recommended_action == "rotate_proxy_and_retry":
+        recommended_action = "manual_review"
+        recommended_action_hint = "当前为直连环境，无法通过换代理规避，建议降频并优先人工复核"
+    strategy_flags = _playwright_strategy_flags(recommended_action)
+    return {
+        "stage": diagnostics.get("stage"),
+        "strategy": diagnostics.get("strategy"),
+        "failure_reason": diagnostics.get("failure_reason"),
+        "diagnosis_category": diagnosis_category,
+        "diagnosis_label": diagnosis_label,
+        "diagnosis_hint": diagnosis_hint,
+        "recommended_action": recommended_action,
+        "recommended_action_hint": recommended_action_hint,
+        "strategy_flags": strategy_flags,
+        "post_failure_strategy": post_failure_strategy,
+        "next_run_policy": (post_failure_strategy or {}).get("next_run_policy") if isinstance(post_failure_strategy, dict) else None,
+        "callback_url": diagnostics.get("callback_url"),
+        "current_url": diagnostics.get("current_url"),
+        "callback_candidate": diagnostics.get("callback_candidate"),
+        "has_session_token": bool(diagnostics.get("has_session_token")),
+        "has_access_token": bool(diagnostics.get("has_access_token")),
+        "has_refresh_token": bool(diagnostics.get("has_refresh_token")),
+        "used_native_backfill": bool(diagnostics.get("used_native_backfill")),
+        "used_browser_retry": bool(diagnostics.get("used_browser_retry")),
+        "used_signin_bridge": bool(diagnostics.get("used_signin_bridge")),
+        "artifact": diagnostics.get("artifact") if isinstance(diagnostics.get("artifact"), dict) else None,
+        "browser_probe": browser_probe_summary,
+    }
+
+
+def _build_playwright_stats(tasks: List[RegistrationTask], limit: int = 50) -> dict:
+    diagnosis_counts: Dict[str, int] = {}
+    rotate_proxy_count = 0
+    fresh_fingerprint_count = 0
+    throttle_count = 0
+    samples_total = 0
+    samples_failed = 0
+
+    for task in tasks[:limit]:
+        result = task.result if isinstance(getattr(task, "result", None), dict) else None
+        if not result:
+            continue
+        summary = _extract_playwright_summary(result)
+        if not summary:
+            continue
+        samples_total += 1
+        task_status = str(getattr(task, "status", "") or "").strip().lower()
+        result_success = result.get("success") if isinstance(result, dict) else None
+        if task_status != "failed" and result_success is not False:
+            continue
+        samples_failed += 1
+        diagnosis = str(summary.get("diagnosis_label") or summary.get("diagnosis_category") or "未知")
+        diagnosis_counts[diagnosis] = diagnosis_counts.get(diagnosis, 0) + 1
+        strategy = summary.get("post_failure_strategy") if isinstance(summary.get("post_failure_strategy"), dict) else {}
+        next_run_policy = summary.get("next_run_policy") if isinstance(summary.get("next_run_policy"), dict) else {}
+        if bool(strategy.get("should_rotate_proxy")) or bool(next_run_policy.get("rotate_proxy_before_retry")):
+            rotate_proxy_count += 1
+        if bool(next_run_policy.get("prefer_fresh_fingerprint")):
+            fresh_fingerprint_count += 1
+        if bool(strategy.get("needs_manual_review")):
+            throttle_count += 1
+
+    top_diagnosis = sorted(diagnosis_counts.items(), key=lambda item: (-item[1], item[0]))[:5]
+    return {
+        "samples": samples_failed,
+        "samples_total": samples_total,
+        "samples_failed": samples_failed,
+        "top_diagnosis": [{"label": label, "count": count} for label, count in top_diagnosis],
+        "rotate_proxy_count": rotate_proxy_count,
+        "fresh_fingerprint_count": fresh_fingerprint_count,
+        "throttle_count": throttle_count,
+    }
+
+
+def _build_playwright_alerts(stats: dict) -> dict:
+    samples = int(stats.get("samples") or 0)
+    top = list(stats.get("top_diagnosis") or [])
+    challenge_count = 0
+    for item in top:
+        if str(item.get("label") or "") == "风控挑战":
+            challenge_count = int(item.get("count") or 0)
+            break
+
+    alerts = []
+    if samples >= 5 and challenge_count * 100 >= samples * 40:
+        alerts.append("最近 Playwright 风控挑战占比较高，建议降低频率并优先更换代理/指纹")
+    if samples >= 5 and int(stats.get("throttle_count") or 0) * 100 >= samples * 30:
+        alerts.append("最近节流触发较多，说明高风险或需人工复核场景增多")
+    if samples >= 5 and int(stats.get("rotate_proxy_count") or 0) == 0 and int(stats.get("fresh_fingerprint_count") or 0) > 0:
+        alerts.append("近期 Playwright 更偏直连/无代理环境，请重点关注直连风险与人工复核")
+
+    return {
+        "active": bool(alerts),
+        "messages": alerts,
+    }
+
+
+def _append_playwright_diagnosis_log(result_dict: dict, log_callback) -> dict:
+    summary = _extract_playwright_summary(result_dict)
+    if not summary:
+        return result_dict
+    diagnosis_label = str(summary.get("diagnosis_label") or "待进一步排查").strip()
+    diagnosis_hint = str(summary.get("diagnosis_hint") or "").strip()
+    recommended_action = str(summary.get("recommended_action") or "manual_review").strip()
+    recommended_action_hint = str(summary.get("recommended_action_hint") or "").strip()
+    stage = str(summary.get("stage") or "-").strip()
+    final_line = f"[Playwright 诊断] {diagnosis_label} | stage={stage}"
+    if diagnosis_hint:
+        final_line = f"{final_line} | {diagnosis_hint}"
+    if recommended_action_hint:
+        final_line = f"{final_line} | action={recommended_action} | {recommended_action_hint}"
+    try:
+        log_callback(final_line)
+    except Exception:
+        pass
+    metadata = dict((result_dict or {}).get("metadata") or {})
+    metadata["playwright_diagnosis_summary"] = {
+        "label": diagnosis_label,
+        "category": summary.get("diagnosis_category"),
+        "hint": diagnosis_hint,
+        "stage": stage,
+        "recommended_action": recommended_action,
+        "recommended_action_hint": recommended_action_hint,
+        "strategy_flags": dict(summary.get("strategy_flags") or {}),
+    }
+    updated = dict(result_dict or {})
+    updated["metadata"] = metadata
+    return updated
+
+
+def _build_playwright_post_failure_strategy_summary(result_dict: dict) -> Optional[dict]:
+    summary = _extract_playwright_summary(result_dict)
+    if not summary:
+        return None
+    flags = dict(summary.get("strategy_flags") or {})
+    if not flags:
+        return None
+
+    strategy = {
+        "retry_scope": "manual_review",
+        "should_rotate_proxy": bool(flags.get("should_rotate_proxy")),
+        "safe_retry_same_env": bool(flags.get("safe_retry_same_env")),
+        "needs_manual_review": bool(flags.get("needs_manual_review")),
+        "note": str(summary.get("recommended_action_hint") or "").strip(),
+        "next_run_policy": {
+            "fresh_browser_context": True,
+            "reuse_browser_storage": False,
+            "isolate_task_cookies": True,
+            "prefer_fresh_fingerprint": True,
+            "rotate_proxy_before_retry": bool(flags.get("should_rotate_proxy")),
+        },
+    }
+    metadata = dict((result_dict or {}).get("metadata") or {})
+    proxy_used = str(metadata.get("proxy_used") or "").strip()
+    if not proxy_used:
+        strategy["should_rotate_proxy"] = False
+        strategy["next_run_policy"]["rotate_proxy_before_retry"] = False
+        strategy["note"] = (strategy["note"] + "；当前为直连环境，无法通过换代理规避，建议降频并优先人工复核").strip("；")
+    if bool(flags.get("prefer_token_only_retry")):
+        strategy["retry_scope"] = "token_only"
+    elif bool(flags.get("prefer_session_only_retry")):
+        strategy["retry_scope"] = "session_only"
+    elif bool(flags.get("should_rotate_proxy")):
+        strategy["retry_scope"] = "full_retry_with_new_proxy"
+    elif bool(flags.get("safe_retry_same_env")):
+        strategy["retry_scope"] = "light_retry_same_env"
+
+    return strategy
+
+
+def _log_playwright_post_failure_strategy(
+    result_dict: dict,
+    *,
+    log_callback,
+    batch_id: str = "",
+) -> dict:
+    strategy = _build_playwright_post_failure_strategy_summary(result_dict)
+    if not strategy:
+        return result_dict
+
+    retry_scope = str(strategy.get("retry_scope") or "manual_review")
+    note = str(strategy.get("note") or "").strip()
+    line = f"[Playwright 后续动作] retry_scope={retry_scope}"
+    if strategy.get("should_rotate_proxy"):
+        line += " | should_rotate_proxy=true"
+    if strategy.get("safe_retry_same_env"):
+        line += " | safe_retry_same_env=true"
+    if strategy.get("needs_manual_review"):
+        line += " | needs_manual_review=true"
+    if note:
+        line += f" | {note}"
+    next_run_policy = dict(strategy.get("next_run_policy") or {})
+    if next_run_policy:
+        line += " | next=fresh_context"
+        if next_run_policy.get("rotate_proxy_before_retry"):
+            line += ",rotate_proxy"
+        if next_run_policy.get("prefer_fresh_fingerprint"):
+            line += ",fresh_fingerprint"
+        if next_run_policy.get("isolate_task_cookies"):
+            line += ",isolated_cookies"
+    try:
+        log_callback(line)
+    except Exception:
+        pass
+    if batch_id:
+        try:
+            add_auto_registration_log(f"[自动注册策略] {line}")
+        except Exception:
+            pass
+
+    metadata = dict((result_dict or {}).get("metadata") or {})
+    metadata["playwright_post_failure_strategy"] = strategy
+    updated = dict(result_dict or {})
+    updated["metadata"] = metadata
+    return updated
+
+
+def _resolve_playwright_artifact_path(relative_path: str) -> Path:
+    requested = str(relative_path or "").strip().replace("\\", "/")
+    if not requested:
+        raise HTTPException(status_code=400, detail="artifact_path 不能为空")
+    if not requested.startswith("playwright-artifacts/"):
+        raise HTTPException(status_code=400, detail="artifact_path 非法")
+
+    base_dir = (get_data_dir() / "playwright-artifacts").resolve()
+    target = (get_data_dir() / requested).resolve()
+    if base_dir not in target.parents and target != base_dir:
+        raise HTTPException(status_code=400, detail="artifact_path 非法")
+    if target.suffix.lower() != ".png":
+        raise HTTPException(status_code=400, detail="仅支持下载 PNG artifact")
+    if not target.exists() or not target.is_file():
+        raise HTTPException(status_code=404, detail="artifact 不存在")
+    return target
+
+
 def _normalize_email_service_config(
     service_type: EmailServiceType,
     config: Optional[dict],
@@ -288,11 +645,17 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
             # 否则从代理列表或系统设置中获取
             actual_proxy_url = proxy
             proxy_id = None
+            execution_overrides = _load_task_execution_overrides(task)
 
             if not actual_proxy_url:
-                actual_proxy_url, proxy_id = get_proxy_for_registration(db)
+                actual_proxy_url, proxy_id = get_proxy_for_registration_with_exclusions(
+                    db,
+                    excluded_proxy_urls=execution_overrides.get("excluded_proxy_urls") or [],
+                )
                 if actual_proxy_url:
                     logger.info(f"任务 {task_uuid} 使用代理: {actual_proxy_url[:50]}...")
+                    if execution_overrides.get("excluded_proxy_urls"):
+                        logger.info("任务 %s 已避开最近失败代理，改用新代理", task_uuid)
 
             # 更新任务的代理记录
             crud.update_registration_task(db, task_uuid, proxy=actual_proxy_url)
@@ -500,13 +863,18 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
 
             # 创建注册引擎 - 使用 TaskManager 的日志回调
             log_callback = task_manager.create_log_callback(task_uuid, prefix=log_prefix, batch_id=batch_id)
+            if execution_overrides.get("prefer_fresh_fingerprint"):
+                log_callback("[策略] 本轮任务已标记为 fresh_fingerprint，建议使用新的浏览器指纹配置")
+            if execution_overrides.get("excluded_proxy_urls"):
+                log_callback("[策略] 本轮任务已启用 rotate_proxy_before_retry，避免沿用最近失败代理")
 
             engine = RegistrationEngine(
                 email_service=email_service,
                 proxy_url=actual_proxy_url,
                 callback_logger=log_callback,
                 task_uuid=task_uuid,
-                cancel_requested=lambda: task_manager.is_cancelled(task_uuid)
+                cancel_requested=lambda: task_manager.is_cancelled(task_uuid),
+                fingerprint_profile_exclude_id=(execution_overrides.get("previous_fingerprint_profile_id") if execution_overrides.get("prefer_fresh_fingerprint") else None),
             )
 
             # 执行注册
@@ -628,12 +996,14 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                         log_callback(f"[TM] 上传异常: {tm_err}")
 
                 # 更新任务状态
+                result_payload = _append_playwright_diagnosis_log(result.to_dict(), log_callback)
                 crud.update_registration_task(
                     db, task_uuid,
                     status="completed",
                     completed_at=utcnow_naive(),
-                    result=result.to_dict()
+                    result=result_payload
                 )
+                invalidate_playwright_stats_cache()
 
                 # 更新 TaskManager 状态
                 effective_scheme = None
@@ -643,16 +1013,29 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
 
                 logger.info(f"注册任务完成: {task_uuid}, 邮箱: {result.email}")
             else:
+                result_payload = _append_playwright_diagnosis_log(result.to_dict(), log_callback)
+                result_payload = _log_playwright_post_failure_strategy(
+                    result_payload,
+                    log_callback=log_callback,
+                    batch_id=batch_id,
+                )
                 # 更新任务状态为失败
                 crud.update_registration_task(
                     db, task_uuid,
                     status="failed",
                     completed_at=utcnow_naive(),
-                    error_message=result.error_message
+                    error_message=result.error_message,
+                    result=result_payload,
                 )
+                invalidate_playwright_stats_cache()
 
                 # 更新 TaskManager 状态
-                task_manager.update_status(task_uuid, "failed", error=result.error_message)
+                task_manager.update_status(
+                    task_uuid,
+                    "failed",
+                    error=result.error_message,
+                    **_extract_followup_status_payload(result_payload),
+                )
 
                 logger.warning(f"注册任务失败: {task_uuid}, 原因: {result.error_message}")
 
@@ -678,6 +1061,7 @@ def _run_sync_registration_task(task_uuid: str, email_service_type: str, proxy: 
                         completed_at=utcnow_naive(),
                         error_message=str(e)
                     )
+                    invalidate_playwright_stats_cache()
 
                 # 更新 TaskManager 状态
                 task_manager.update_status(task_uuid, "failed", error=str(e))
@@ -737,7 +1121,9 @@ def _init_batch_state(batch_id: str, task_uuids: List[str]):
         "task_uuids": task_uuids,
         "current_index": 0,
         "logs": [],
-        "finished": False
+        "finished": False,
+        "last_failure_strategy": None,
+        "throttle_until": 0.0,
     }
 
 
@@ -754,6 +1140,87 @@ def _make_batch_helpers(batch_id: str):
         task_manager.update_batch_status(batch_id, **kwargs)
 
     return add_batch_log, update_batch_status
+
+
+def _summarize_next_run_policy(next_run_policy: Optional[dict]) -> str:
+    if not isinstance(next_run_policy, dict):
+        return ""
+    labels = []
+    if next_run_policy.get("fresh_browser_context"):
+        labels.append("fresh_context")
+    if next_run_policy.get("rotate_proxy_before_retry"):
+        labels.append("rotate_proxy")
+    if next_run_policy.get("prefer_fresh_fingerprint"):
+        labels.append("fresh_fingerprint")
+    if next_run_policy.get("isolate_task_cookies"):
+        labels.append("isolated_cookies")
+    if next_run_policy.get("reuse_browser_storage") is False:
+        labels.append("no_storage_reuse")
+    return " / ".join(labels)
+
+
+def _capture_task_followup_strategy(task) -> Optional[dict]:
+    result = task.result if isinstance(getattr(task, "result", None), dict) else {}
+    metadata = result.get("metadata") if isinstance(result, dict) else {}
+    if not isinstance(metadata, dict):
+        return None
+    strategy = metadata.get("playwright_post_failure_strategy")
+    if not isinstance(strategy, dict):
+        return None
+    return strategy
+
+
+def _compute_followup_throttle_seconds(followup: Optional[dict]) -> int:
+    if not isinstance(followup, dict):
+        return 0
+    if bool(followup.get("needs_manual_review")):
+        return 45
+    if bool(followup.get("should_rotate_proxy")):
+        return 20
+    return 0
+
+
+def _apply_batch_throttle_window(batch_id: str, seconds: int) -> None:
+    if seconds <= 0:
+        return
+    batch_tasks[batch_id]["throttle_until"] = max(
+        float(batch_tasks[batch_id].get("throttle_until") or 0.0),
+        time.time() + float(seconds),
+    )
+
+
+def _remaining_batch_throttle_seconds(batch_id: str) -> int:
+    until = float(batch_tasks[batch_id].get("throttle_until") or 0.0)
+    return max(0, int(round(until - time.time())))
+
+
+def _extract_followup_status_payload(result_dict: dict) -> dict:
+    metadata = dict((result_dict or {}).get("metadata") or {})
+    strategy = metadata.get("playwright_post_failure_strategy")
+    if not isinstance(strategy, dict):
+        return {}
+    next_run_policy = strategy.get("next_run_policy") if isinstance(strategy.get("next_run_policy"), dict) else {}
+    return {
+        "playwright_retry_scope": strategy.get("retry_scope"),
+        "playwright_should_rotate_proxy": bool(strategy.get("should_rotate_proxy")),
+        "playwright_safe_retry_same_env": bool(strategy.get("safe_retry_same_env")),
+        "playwright_needs_manual_review": bool(strategy.get("needs_manual_review")),
+        "playwright_next_run_policy": dict(next_run_policy),
+    }
+
+
+def _load_task_execution_overrides(task) -> dict:
+    result = task.result if isinstance(getattr(task, "result", None), dict) else {}
+    metadata = result.get("metadata") if isinstance(result, dict) else {}
+    strategy = metadata.get("playwright_post_failure_strategy") if isinstance(metadata, dict) else None
+    next_run_policy = strategy.get("next_run_policy") if isinstance(strategy, dict) else {}
+    previous_fingerprint_profile_id = str(((metadata.get("playwright_diagnostics") or {}) if isinstance(metadata, dict) else {}).get("browser_probe", {}).get("fingerprint_profile_id") or "").strip()
+    return {
+        "rotate_proxy_before_retry": bool((next_run_policy or {}).get("rotate_proxy_before_retry")),
+        "prefer_fresh_fingerprint": bool((next_run_policy or {}).get("prefer_fresh_fingerprint")),
+        "excluded_proxy_urls": [str(task.proxy or "").strip()] if bool((next_run_policy or {}).get("rotate_proxy_before_retry")) and str(task.proxy or "").strip() else [],
+        "previous_fingerprint_profile_id": previous_fingerprint_profile_id,
+    }
 
 
 async def _wait_for_batch_delay(batch_id: str, seconds: int) -> bool:
@@ -822,6 +1289,12 @@ async def run_batch_parallel(
             if task_manager.is_batch_cancelled(batch_id) or batch_tasks[batch_id]["cancelled"]:
                 _mark_batch_tasks_cancelled(batch_id, [uuid])
                 return
+            extra_wait = _remaining_batch_throttle_seconds(batch_id)
+            if extra_wait > 0:
+                add_batch_log(f"{prefix} [节流] 并行模式检测到高风险场景，启动前额外等待 {extra_wait} 秒")
+                if not await _wait_for_batch_delay(batch_id, extra_wait):
+                    _mark_batch_tasks_cancelled(batch_id, [uuid])
+                    return
             await run_registration_task(
                 uuid, email_service_type, proxy, email_service_config, email_service_id,
                 log_prefix=prefix, batch_id=batch_id,
@@ -844,6 +1317,15 @@ async def run_batch_parallel(
                     elif t.status == "failed":
                         new_failed += 1
                         add_batch_log(f"{prefix} [失败] 注册失败: {t.error_message}")
+                        followup = _capture_task_followup_strategy(t)
+                        if followup:
+                            batch_tasks[batch_id]["last_failure_strategy"] = dict(followup)
+                            _apply_batch_throttle_window(batch_id, _compute_followup_throttle_seconds(followup))
+                            next_run = _summarize_next_run_policy(followup.get("next_run_policy"))
+                            add_batch_log(
+                                f"{prefix} [策略] 下一轮建议: retry_scope={followup.get('retry_scope') or 'manual_review'}"
+                                + (f" | {next_run}" if next_run else "")
+                            )
                     update_batch_status(completed=new_completed, success=new_success, failed=new_failed)
 
     try:
@@ -913,6 +1395,15 @@ async def run_batch_pipeline(
                         elif t.status == "failed":
                             new_failed += 1
                             add_batch_log(f"{pfx} [失败] 注册失败: {t.error_message}")
+                            followup = _capture_task_followup_strategy(t)
+                            if followup:
+                                batch_tasks[batch_id]["last_failure_strategy"] = dict(followup)
+                                next_run = _summarize_next_run_policy(followup.get("next_run_policy"))
+                                add_batch_log(
+                                    f"{pfx} [策略] 下一轮建议: retry_scope={followup.get('retry_scope') or 'manual_review'}"
+                                    + (f" | {next_run}" if next_run else "")
+                                )
+                                _apply_batch_throttle_window(batch_id, _compute_followup_throttle_seconds(followup))
                         update_batch_status(completed=new_completed, success=new_success, failed=new_failed)
         finally:
             semaphore.release()
@@ -934,6 +1425,10 @@ async def run_batch_pipeline(
 
             if i < len(task_uuids) - 1 and not task_manager.is_batch_cancelled(batch_id):
                 wait_time = random.randint(interval_min, interval_max)
+                extra_wait = _remaining_batch_throttle_seconds(batch_id)
+                if extra_wait > 0:
+                    add_batch_log(f"{prefix} [节流] 检测到需要人工复核/高风险场景，下一任务额外延迟 {extra_wait} 秒")
+                    wait_time += extra_wait
                 logger.info(f"批量任务 {batch_id}: 等待 {wait_time} 秒后启动下一个任务")
                 if not await _wait_for_batch_delay(batch_id, wait_time):
                     _mark_batch_tasks_cancelled(batch_id, task_uuids[i + 1:])
@@ -1033,6 +1528,9 @@ async def run_auto_registration_batch(plan, settings: Settings) -> str:
     )
     add_auto_registration_log(
         f"[自动注册] 已创建补货批量任务 {batch_id}，计划注册 {len(task_uuids)} 个账号"
+    )
+    add_auto_registration_log(
+        "[自动注册] Playwright 失败后将优先遵循 fresh_context / fresh_fingerprint / isolated_cookies 策略，必要时提示换代理"
     )
     logger.info(
         "自动注册批量任务已创建: batch=%s, count=%s, cpa_service_id=%s",
@@ -1262,11 +1760,23 @@ async def get_auto_registration_monitor():
     current_batch_id = auto_state.get("current_batch_id")
     batch = batch_tasks.get(current_batch_id) if current_batch_id else None
     logs = get_auto_registration_logs().copy()
+    def _tasks_provider():
+        with get_db() as db:
+            return db.query(RegistrationTask).order_by(desc(RegistrationTask.created_at)).limit(50).all()
+
+    playwright_stats, playwright_alerts = get_cached_playwright_stats(
+        _tasks_provider,
+        stats_builder=_build_playwright_stats,
+        alerts_builder=_build_playwright_alerts,
+        ttl_seconds=15,
+    )
     if batch and current_batch_id:
         logs.extend(task_manager.get_batch_logs(current_batch_id))
 
     return {
         **auto_state,
+        "playwright": playwright_stats,
+        "playwright_alerts": playwright_alerts,
         "logs": logs,
         "batch": {
             "batch_id": current_batch_id,
@@ -1350,8 +1860,15 @@ async def get_task_logs(task_uuid: str):
             "email": email,
             "email_service": service_type,
             "effective_scheme": metadata.get("registration_scheme_label_effective") or metadata.get("registration_scheme_label"),
+            "playwright": _extract_playwright_summary(result),
             "logs": logs.split("\n") if logs else []
         }
+
+
+@router.get("/artifacts/playwright")
+async def download_playwright_artifact(path: str = Query(..., description="相对 data 目录的 artifact 路径")):
+    target = _resolve_playwright_artifact_path(path)
+    return FileResponse(path=str(target), media_type="image/png", filename=target.name)
 
 
 @router.post("/tasks/{task_uuid}/cancel")
@@ -1391,8 +1908,6 @@ async def delete_task(task_uuid: str):
 async def get_registration_stats():
     """获取注册统计信息"""
     with get_db() as db:
-        from sqlalchemy import func
-
         # 按状态统计
         status_stats = db.query(
             RegistrationTask.status,
@@ -1418,6 +1933,16 @@ async def get_registration_stats():
         today_total = int(today_count or 0)
         today_success_rate = round((today_success / today_total) * 100, 1) if today_total > 0 else 0.0
 
+        def _tasks_provider():
+            return db.query(RegistrationTask).order_by(desc(RegistrationTask.created_at)).limit(100).all()
+
+        playwright_stats, playwright_alerts = get_cached_playwright_stats(
+            _tasks_provider,
+            stats_builder=_build_playwright_stats,
+            alerts_builder=_build_playwright_alerts,
+            ttl_seconds=15,
+        )
+
         return {
             "by_status": {status: count for status, count in status_stats},
             "today_count": today_total,
@@ -1426,6 +1951,8 @@ async def get_registration_stats():
             "today_failed": today_failed,
             "today_success_rate": today_success_rate,
             "today_by_status": today_by_status,
+            "playwright": playwright_stats,
+            "playwright_alerts": playwright_alerts,
         }
 
 

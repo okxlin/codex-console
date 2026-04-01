@@ -87,6 +87,10 @@ class RegistrationSettings(BaseModel):
     sleep_max: int = 30
     entry_flow: str = "fast"
     refresh_backfill_enabled: bool = False
+    playwright_failure_screenshot_enabled: bool = True
+    playwright_artifact_retention_days: int = 7
+    playwright_artifact_max_total_size_mb: int = 512
+    playwright_artifact_max_total_files: int = 500
     auto_enabled: bool = False
     auto_check_interval: int = 60
     auto_min_ready_auth_files: int = 1
@@ -145,6 +149,8 @@ async def get_all_settings():
         entry_flow = "fast"
     elif entry_flow_raw == "abcard":
         entry_flow = "abcard"
+    elif entry_flow_raw == "playwright":
+        entry_flow = "playwright"
     elif entry_flow_raw == "native":
         entry_flow = "native"
     else:
@@ -153,6 +159,7 @@ async def get_all_settings():
         "fast": "极速流",
         "auto": "自动推荐",
         "abcard": "方案二 / Session 复用直取",
+        "playwright": "Playwright / 浏览器态优先收尾",
         "native": "方案一 / 原生闭环收尾",
     }[entry_flow]
 
@@ -178,6 +185,10 @@ async def get_all_settings():
             "sleep_max": settings.registration_sleep_max,
             "entry_flow": entry_flow,
             "refresh_backfill_enabled": settings.registration_refresh_backfill_enabled,
+            "playwright_failure_screenshot_enabled": settings.registration_playwright_failure_screenshot_enabled,
+            "playwright_artifact_retention_days": settings.registration_playwright_artifact_retention_days,
+            "playwright_artifact_max_total_size_mb": settings.registration_playwright_artifact_max_total_size_mb,
+            "playwright_artifact_max_total_files": settings.registration_playwright_artifact_max_total_files,
             "entry_flow_label": entry_flow_label,
             "auto_enabled": settings.registration_auto_enabled,
             "auto_check_interval": settings.registration_auto_check_interval,
@@ -327,6 +338,8 @@ async def get_registration_settings():
         entry_flow = "fast"
     elif entry_flow_raw == "abcard":
         entry_flow = "abcard"
+    elif entry_flow_raw == "playwright":
+        entry_flow = "playwright"
     elif entry_flow_raw == "native":
         entry_flow = "native"
     else:
@@ -335,6 +348,7 @@ async def get_registration_settings():
         "fast": "极速流",
         "auto": "自动推荐",
         "abcard": "方案二 / Session 复用直取",
+        "playwright": "Playwright / 浏览器态优先收尾",
         "native": "方案一 / 原生闭环收尾",
     }[entry_flow]
 
@@ -346,6 +360,10 @@ async def get_registration_settings():
         "sleep_max": settings.registration_sleep_max,
         "entry_flow": entry_flow,
         "refresh_backfill_enabled": settings.registration_refresh_backfill_enabled,
+        "playwright_failure_screenshot_enabled": settings.registration_playwright_failure_screenshot_enabled,
+        "playwright_artifact_retention_days": settings.registration_playwright_artifact_retention_days,
+        "playwright_artifact_max_total_size_mb": settings.registration_playwright_artifact_max_total_size_mb,
+        "playwright_artifact_max_total_files": settings.registration_playwright_artifact_max_total_files,
         "entry_flow_label": entry_flow_label,
         "auto_enabled": settings.registration_auto_enabled,
         "auto_check_interval": settings.registration_auto_check_interval,
@@ -392,15 +410,26 @@ async def update_registration_settings(request: RegistrationSettings):
         flow = "fast"
     elif flow in {"auto", "recommended", "default"}:
         flow = "auto"
+    elif flow in {"playwright", "browser", "browser_capture", "pw"}:
+        flow = "playwright"
     if flow in {"scheme1", "plan1", "solution1", "v1", "browser_fsm"}:
         flow = "native"
     elif flow in {"scheme2", "plan2", "solution2", "v2", "session_reuse"}:
         flow = "abcard"
-    if flow not in {"fast", "auto", "native", "abcard"}:
-        raise HTTPException(status_code=400, detail="entry_flow 仅支持 fast / auto / native / abcard")
+    if flow not in {"fast", "auto", "native", "abcard", "playwright"}:
+        raise HTTPException(status_code=400, detail="entry_flow 仅支持 fast / auto / native / abcard / playwright")
 
     if request.auto_check_interval < 5 or request.auto_check_interval > 3600:
         raise HTTPException(status_code=400, detail="自动注册检查间隔必须在 5-3600 秒之间")
+
+    if request.playwright_artifact_retention_days < 1 or request.playwright_artifact_retention_days > 365:
+        raise HTTPException(status_code=400, detail="Playwright 截图保留天数必须在 1-365 之间")
+
+    if request.playwright_artifact_max_total_size_mb < 64 or request.playwright_artifact_max_total_size_mb > 10240:
+        raise HTTPException(status_code=400, detail="Playwright 截图总容量上限必须在 64-10240 MB 之间")
+
+    if request.playwright_artifact_max_total_files < 10 or request.playwright_artifact_max_total_files > 100000:
+        raise HTTPException(status_code=400, detail="Playwright 截图文件数上限必须在 10-100000 之间")
 
     if request.auto_min_ready_auth_files < 1 or request.auto_min_ready_auth_files > 10000:
         raise HTTPException(status_code=400, detail="自动注册保底数量必须在 1-10000 之间")
@@ -473,6 +502,10 @@ async def update_registration_settings(request: RegistrationSettings):
         registration_sleep_max=request.sleep_max,
         registration_entry_flow=flow,
         registration_refresh_backfill_enabled=request.refresh_backfill_enabled,
+        registration_playwright_failure_screenshot_enabled=request.playwright_failure_screenshot_enabled,
+        registration_playwright_artifact_retention_days=request.playwright_artifact_retention_days,
+        registration_playwright_artifact_max_total_size_mb=request.playwright_artifact_max_total_size_mb,
+        registration_playwright_artifact_max_total_files=request.playwright_artifact_max_total_files,
         registration_auto_enabled=request.auto_enabled,
         registration_auto_check_interval=request.auto_check_interval,
         registration_auto_min_ready_auth_files=request.auto_min_ready_auth_files,

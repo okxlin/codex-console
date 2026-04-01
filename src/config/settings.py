@@ -255,13 +255,37 @@ SETTING_DEFINITIONS: Dict[str, SettingDefinition] = {
         db_key="registration.entry_flow",
         default_value="fast",
         category=SettingCategory.REGISTRATION,
-        description="注册入口链路（fast=极速流/默认, auto=按邮箱类型与网络环境自动推荐, native=方案一/原生闭环收尾, abcard=方案二/Session 复用直取；仅 auto 模式会根据邮箱类型推荐 Outlook 专用链路）"
+        description="注册入口链路（fast=极速流/默认, auto=按邮箱类型与网络环境自动推荐, native=方案一/原生闭环收尾, abcard=方案二/Session 复用直取, playwright=Playwright 浏览器态优先收尾；仅 auto 模式会根据邮箱类型推荐 Outlook 专用链路）"
     ),
     "registration_refresh_backfill_enabled": SettingDefinition(
         db_key="registration.refresh_backfill_enabled",
         default_value=False,
         category=SettingCategory.REGISTRATION,
         description="Fast 模式成功后是否尝试复用当前 Cookie 走 Codex OAuth 补全 refresh_token（失败不影响主注册成功）"
+    ),
+    "registration_playwright_failure_screenshot_enabled": SettingDefinition(
+        db_key="registration.playwright.failure_screenshot_enabled",
+        default_value=True,
+        category=SettingCategory.REGISTRATION,
+        description="Playwright 模式失败时是否保留最终截图"
+    ),
+    "registration_playwright_artifact_retention_days": SettingDefinition(
+        db_key="registration.playwright.artifact_retention_days",
+        default_value=7,
+        category=SettingCategory.REGISTRATION,
+        description="Playwright 失败截图保留天数"
+    ),
+    "registration_playwright_artifact_max_total_size_mb": SettingDefinition(
+        db_key="registration.playwright.artifact_max_total_size_mb",
+        default_value=512,
+        category=SettingCategory.REGISTRATION,
+        description="Playwright 失败截图总容量上限（MB）"
+    ),
+    "registration_playwright_artifact_max_total_files": SettingDefinition(
+        db_key="registration.playwright.artifact_max_total_files",
+        default_value=500,
+        category=SettingCategory.REGISTRATION,
+        description="Playwright 失败截图文件数上限"
     ),
     "registration_auto_enabled": SettingDefinition(
         db_key="registration.auto.enabled",
@@ -979,6 +1003,10 @@ class Settings(BaseModel):
     registration_sleep_max: int = 30
     registration_entry_flow: str = "auto"
     registration_refresh_backfill_enabled: bool = False
+    registration_playwright_failure_screenshot_enabled: bool = True
+    registration_playwright_artifact_retention_days: int = 7
+    registration_playwright_artifact_max_total_size_mb: int = 512
+    registration_playwright_artifact_max_total_files: int = 500
     registration_auto_enabled: bool = False
     registration_auto_check_interval: int = 60
     registration_auto_min_ready_auth_files: int = 1

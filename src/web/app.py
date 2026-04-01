@@ -53,12 +53,17 @@ def _build_static_asset_version(static_dir: Path) -> str:
 
 def create_app() -> FastAPI:
     """创建 FastAPI 应用实例"""
+    # 先初始化数据库，再首次读取设置，避免容器重建时默认值被提前缓存进 _settings。
+    from ..database.init_db import initialize_database
+
+    initialize_database()
     settings = get_settings()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         from ..database.init_db import initialize_database
         from ..core.db_logs import cleanup_database_logs
+        from ..core.playwright_artifacts import cleanup_playwright_artifacts
         from ..core.auto_registration import (
             AutoRegistrationCoordinator,
             register_auto_registration_coordinator,
@@ -109,8 +114,31 @@ def create_app() -> FastAPI:
                 except Exception as exc:
                     logger.warning(f"后台日志定时清理异常: {exc}")
 
+        async def run_playwright_artifact_cleanup_once():
+            try:
+                result = await asyncio.to_thread(cleanup_playwright_artifacts)
+                logger.info(
+                    "Playwright artifact 清理完成: 删除 %s 个，剩余 %s 个",
+                    result.get("deleted_total", 0),
+                    result.get("remaining", 0),
+                )
+            except Exception as exc:
+                logger.warning(f"Playwright artifact 清理失败: {exc}")
+
+        async def periodic_playwright_artifact_cleanup():
+            while True:
+                try:
+                    await asyncio.sleep(3600)
+                    await run_playwright_artifact_cleanup_once()
+                except asyncio.CancelledError:
+                    break
+                except Exception as exc:
+                    logger.warning(f"Playwright artifact 定时清理异常: {exc}")
+
         await run_log_cleanup_once()
         app.state.log_cleanup_task = asyncio.create_task(periodic_log_cleanup())
+        await run_playwright_artifact_cleanup_once()
+        app.state.playwright_artifact_cleanup_task = asyncio.create_task(periodic_playwright_artifact_cleanup())
 
         logger.info("=" * 50)
         logger.info(f"{settings.app_name} v{settings.app_version} 启动中，程序正在伸懒腰...")
@@ -134,6 +162,9 @@ def create_app() -> FastAPI:
             cleanup_task = getattr(app.state, "log_cleanup_task", None)
             if cleanup_task:
                 cleanup_task.cancel()
+            playwright_artifact_cleanup_task = getattr(app.state, "playwright_artifact_cleanup_task", None)
+            if playwright_artifact_cleanup_task:
+                playwright_artifact_cleanup_task.cancel()
             logger.info("应用关闭，今天先收摊啦")
 
     app = FastAPI(
