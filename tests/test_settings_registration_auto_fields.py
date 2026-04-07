@@ -31,6 +31,7 @@ class DummySettings:
     registration_entry_flow = "abcard"
     registration_refresh_backfill_enabled = True
     registration_playwright_failure_screenshot_enabled = True
+    registration_playwright_headed = True
     registration_playwright_artifact_retention_days = 7
     registration_playwright_artifact_max_total_size_mb = 512
     registration_playwright_artifact_max_total_files = 500
@@ -84,6 +85,7 @@ def test_get_registration_settings_includes_auto_fields(monkeypatch):
     assert result["entry_flow"] == "abcard"
     assert result["refresh_backfill_enabled"] is True
     assert result["playwright_failure_screenshot_enabled"] is True
+    assert result["playwright_headed"] is True
     assert result["playwright_artifact_retention_days"] == 7
     assert result["playwright_artifact_max_total_size_mb"] == 512
     assert result["playwright_artifact_max_total_files"] == 500
@@ -213,6 +215,7 @@ def test_update_registration_settings_persists_auto_fields(monkeypatch):
         sleep_max=15,
         entry_flow="abcard",
         refresh_backfill_enabled=True,
+        playwright_headed=True,
         auto_enabled=True,
         auto_check_interval=120,
         auto_min_ready_auth_files=5,
@@ -243,6 +246,7 @@ def test_update_registration_settings_persists_auto_fields(monkeypatch):
     payload = update_calls[0]
     assert payload["registration_entry_flow"] == "abcard"
     assert payload["registration_refresh_backfill_enabled"] is True
+    assert payload["registration_playwright_headed"] is True
     assert payload["registration_auto_enabled"] is True
     assert payload["registration_auto_check_interval"] == 120
     assert payload["registration_auto_min_ready_auth_files"] == 5
