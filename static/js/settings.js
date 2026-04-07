@@ -368,6 +368,7 @@ async function loadSettings() {
         document.getElementById('registration-entry-flow').value = entryFlow;
         document.getElementById('refresh-backfill-enabled').value = String(Boolean(data.registration?.refresh_backfill_enabled));
         document.getElementById('playwright-failure-screenshot-enabled').value = String(Boolean(data.registration?.playwright_failure_screenshot_enabled ?? true));
+        document.getElementById('playwright-headed').value = String(Boolean(data.registration?.playwright_headed));
         document.getElementById('playwright-artifact-retention-days').value = data.registration?.playwright_artifact_retention_days || 7;
         document.getElementById('playwright-artifact-max-total-size-mb').value = data.registration?.playwright_artifact_max_total_size_mb || 512;
         document.getElementById('playwright-artifact-max-total-files').value = data.registration?.playwright_artifact_max_total_files || 500;
@@ -560,6 +561,7 @@ async function handleSaveRegistration(e) {
         entry_flow: document.getElementById('registration-entry-flow').value || 'fast',
         refresh_backfill_enabled: document.getElementById('refresh-backfill-enabled').value === 'true',
         playwright_failure_screenshot_enabled: document.getElementById('playwright-failure-screenshot-enabled').value === 'true',
+        playwright_headed: document.getElementById('playwright-headed').value === 'true',
         playwright_artifact_retention_days: parseInt(document.getElementById('playwright-artifact-retention-days').value || '7', 10),
         playwright_artifact_max_total_size_mb: parseInt(document.getElementById('playwright-artifact-max-total-size-mb').value || '512', 10),
         playwright_artifact_max_total_files: parseInt(document.getElementById('playwright-artifact-max-total-files').value || '500', 10),
