@@ -5,7 +5,7 @@ from types import SimpleNamespace
 from src.config.constants import EmailServiceType, OPENAI_API_ENDPOINTS, OPENAI_PAGE_TYPES
 from src.core.http_client import OpenAIHTTPClient
 from src.core.openai.oauth import OAuthStart
-from src.core.register import RegistrationEngine, RegistrationResult, SignupFormResult
+from src.core.register import RegistrationEngine, RegistrationResult
 from src.services.base import BaseEmailService
 
 
@@ -134,7 +134,7 @@ class FakeOpenAIClient:
     def check_ip_location(self):
         return True, "US"
 
-    def check_sentinel(self, did, flow="authorize_continue"):
+    def check_sentinel(self, did):
         if not self._sentinel_tokens:
             raise AssertionError("no sentinel token queued")
         return self._sentinel_tokens.pop(0)
@@ -258,257 +258,10 @@ def test_playwright_mode_records_failure_reason_when_session_token_missing(monke
     ok = engine._complete_token_exchange_playwright(result)
 
     assert ok is False
-
-
-def test_abcard_post_create_reuse_is_preferred(monkeypatch):
-    email_service = FakeEmailService([])
-    engine = RegistrationEngine(email_service)
-    result = RegistrationResult(success=False, metadata={})
-
-    calls = {"reuse": 0, "browser": 0}
-
-    def fake_reuse(target):
-        calls["reuse"] += 1
-        target.access_token = "access-abcard"
-        target.session_token = "session-abcard"
-        return True
-
-    monkeypatch.setattr(engine, "_try_reuse_current_registration_session", fake_reuse)
-    monkeypatch.setattr(engine, "_try_browser_side_channel_session_capture", lambda target: calls.__setitem__("browser", calls["browser"] + 1) or False)
-
-    handled, label = engine._try_preferred_post_create_session_reuse(result, "abcard")
-
-    assert handled is True
-    assert label == "ABCard + 当前会话复用直取"
-    assert calls["reuse"] == 1
-    assert calls["browser"] == 0
-    assert result.metadata["abcard_diagnostics"]["reuse_attempted"] is True
-    assert result.metadata["abcard_diagnostics"]["reuse_succeeded"] is True
-    assert result.metadata["abcard_diagnostics"]["reuse_source"] == "current_registration_session"
-
-
-def test_abcard_stoploss_records_taxonomy():
-    email_service = FakeEmailService([])
-    engine = RegistrationEngine(email_service)
-    engine.session = SimpleNamespace(cookies={"oai-client-auth-session": "cookie-value"})
-    result = RegistrationResult(success=False, metadata={}, workspace_id="ws-1", account_id="acct-1")
-
-    engine._record_abcard_stoploss(
-        result,
-        reason="redirect_follow_failed",
-        continue_url="https://auth.example.test/continue",
-        stage="redirect_follow",
-        recovery_path="workspace_redirect",
-        error_code="abcard_redirect_follow_failed",
-    )
-
-    stoploss = result.metadata["abcard_stoploss"]
-    diagnostics = result.metadata["abcard_diagnostics"]
-
-    assert stoploss["reason"] == "redirect_follow_failed"
-    assert stoploss["stage"] == "redirect_follow"
-    assert stoploss["recovery_path"] == "workspace_redirect"
-    assert stoploss["error_code"] == "abcard_redirect_follow_failed"
-    assert diagnostics["error_code"] == "abcard_redirect_follow_failed"
-    assert diagnostics["error_stage"] == "redirect_follow"
-
-
-def test_run_preserves_abcard_metadata_on_success(monkeypatch):
-    email_service = FakeEmailService(["123456"])
-    engine = RegistrationEngine(email_service)
-    engine.registration_entry_flow = "abcard"
-
-    monkeypatch.setattr(engine, "_check_ip_location", lambda: (True, "US"))
-    monkeypatch.setattr(engine, "_create_email", lambda: setattr(engine, "email", "tester@example.com") or setattr(engine, "email_info", {"service_id": "mailbox-1"}) or True)
-    monkeypatch.setattr(engine, "_prepare_authorize_flow", lambda label: ("did-1", "sentinel-1"))
-    monkeypatch.setattr(engine, "_submit_signup_form", lambda did, sen: SignupFormResult(success=True, page_type="password", is_existing_account=False, response_data={}))
-    monkeypatch.setattr(engine, "_register_password", lambda did, sen: (True, None))
-    monkeypatch.setattr(engine, "_send_verification_code", lambda referer=None: True)
-    monkeypatch.setattr(engine, "_verify_email_otp_with_retry", lambda stage_label, max_attempts=3, **kwargs: True)
-
-    def fake_create_user_account():
-        engine._create_account_workspace_id = "ws-1"
-        engine._create_account_account_id = "acct-1"
-        engine._create_account_refresh_token = "refresh-1"
-        engine._create_account_continue_url = "https://chatgpt.com/api/auth/callback/openai?code=abc"
-        return True
-
-    monkeypatch.setattr(engine, "_create_user_account", fake_create_user_account)
-
-    def fake_preferred_reuse(target, effective_entry_flow):
-        target.access_token = "access-1"
-        target.session_token = "session-1"
-        target.workspace_id = "ws-1"
-        target.account_id = "acct-1"
-        engine._record_abcard_diagnostics(
-            target,
-            stage="post_create_reuse_ok",
-            reuse_attempted=True,
-            reuse_succeeded=True,
-            reuse_source="current_registration_session",
-            recovery_path="direct_reuse",
-            entry_flow="abcard",
-        )
-        return True, "ABCard + 当前会话复用直取"
-
-    monkeypatch.setattr(engine, "_try_preferred_post_create_session_reuse", fake_preferred_reuse)
-    monkeypatch.setattr(engine, "_write_stage_export_files", lambda account: {})
-
-    result = engine.run()
-
-    assert result.success is True
-    assert result.metadata["registration_entry_flow_effective"] == "abcard"
-    assert result.metadata["abcard_diagnostics"]["reuse_attempted"] is True
-    assert result.metadata["abcard_diagnostics"]["reuse_succeeded"] is True
-    assert result.metadata["abcard_diagnostics"]["entry_flow"] == "abcard"
-
-
-def test_check_sentinel_forwards_flow_to_http_client():
-    email_service = FakeEmailService([])
-    engine = RegistrationEngine(email_service)
-
-    calls = []
-
-    class FakeClient:
-        def check_sentinel(self, did, flow="authorize_continue"):
-            calls.append((did, flow))
-            return "sentinel-flow-token"
-
-    engine.http_client = FakeClient()
-
-    token = engine._check_sentinel("device-1", flow="username_password_create")
-
-    assert token == "sentinel-flow-token"
-    assert calls == [("device-1", "username_password_create")]
-
-
-def test_check_sentinel_prefers_browser_token_for_sensitive_flows(monkeypatch):
-    email_service = FakeEmailService([])
-    engine = RegistrationEngine(email_service)
-    engine.proxy_url = "socks5://127.0.0.1:31156"
-    monkeypatch.setenv("OPENAI_BROWSER_SENTINEL_ENABLED", "1")
-
-    browser_calls = []
-    http_calls = []
-
-    class FakeClient:
-        def check_sentinel(self, did, flow="authorize_continue"):
-            http_calls.append((did, flow))
-            return "pow-token"
-
-    engine.http_client = FakeClient()
-
-    monkeypatch.setattr(
-        "src.core.register.get_sentinel_token_via_browser",
-        lambda flow, proxy_url="", page_url="", timeout_seconds=30: browser_calls.append((flow, proxy_url)) or "browser-token",
-    )
-
-    token = engine._check_sentinel("device-1", flow="username_password_create")
-
-    assert token == "browser-token"
-    assert browser_calls == [("username_password_create", "socks5://127.0.0.1:31156")]
-    assert http_calls == []
-
-
-def test_check_sentinel_falls_back_to_pow_when_browser_token_missing(monkeypatch):
-    email_service = FakeEmailService([])
-    engine = RegistrationEngine(email_service)
-    monkeypatch.setenv("OPENAI_BROWSER_SENTINEL_ENABLED", "1")
-
-    http_calls = []
-
-    class FakeClient:
-        def check_sentinel(self, did, flow="authorize_continue"):
-            http_calls.append((did, flow))
-            return "pow-token"
-
-    engine.http_client = FakeClient()
-
-    monkeypatch.setattr(
-        "src.core.register.get_sentinel_token_via_browser",
-        lambda flow, proxy_url="", page_url="", timeout_seconds=30: None,
-    )
-
-    token = engine._check_sentinel("device-2", flow="oauth_create_account")
-
-    assert token == "pow-token"
-    assert http_calls == [("device-2", "oauth_create_account")]
-
-
-def test_register_password_uses_flow_specific_sentinel_and_device_id(monkeypatch):
-    session = QueueSession([
-        ("POST", OPENAI_API_ENDPOINTS["register"], DummyResponse(status_code=200, payload={})),
-    ])
-    email_service = FakeEmailService([])
-    engine = RegistrationEngine(email_service)
-    engine.session = session
-    engine.email = "tester@example.com"
-    engine.device_id = "did-register"
-
-    monkeypatch.setattr(engine, "_generate_password", lambda: "Passw0rd!123456")
-    monkeypatch.setattr(engine, "_check_sentinel", lambda did, flow="authorize_continue": f"token-for-{flow}")
-
-    ok, password = engine._register_password(did="did-register")
-
-    assert ok is True
-    assert password == "Passw0rd!123456"
-    call = session.calls[0]
-    headers = call["kwargs"]["headers"]
-    body = json.loads(call["kwargs"]["data"])
-    sentinel_payload = json.loads(headers["openai-sentinel-token"])
-    assert headers["oai-device-id"] == "did-register"
-    assert headers["origin"] == "https://auth.openai.com"
-    assert sentinel_payload["c"] == "token-for-username_password_create"
-    assert sentinel_payload["flow"] == "username_password_create"
-    assert body == {"password": "Passw0rd!123456", "username": "tester@example.com"}
-
-
-def test_create_user_account_retries_once_after_sentinel_style_400(monkeypatch):
-    session = QueueSession([
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["create_account"],
-            DummyResponse(status_code=400, text='{"error":{"message":"sentinel blocked"}}', payload={"error": {"message": "sentinel blocked"}}),
-        ),
-        (
-            "POST",
-            OPENAI_API_ENDPOINTS["create_account"],
-            DummyResponse(status_code=200, payload={"workspace_id": "ws-1", "account_id": "acct-1"}),
-        ),
-    ])
-    email_service = FakeEmailService([])
-    engine = RegistrationEngine(email_service)
-    engine.session = session
-    engine.device_id = "did-create"
-
-    monkeypatch.setattr("src.core.register.generate_random_user_info", lambda: {"name": "Tester", "birthdate": "1990-01-01"})
-
-    sentinel_calls = []
-
-    def fake_check_sentinel(did, flow="authorize_continue"):
-        sentinel_calls.append((did, flow))
-        return f"token-{len(sentinel_calls)}"
-
-    monkeypatch.setattr(engine, "_check_sentinel", fake_check_sentinel)
-
-    ok = engine._create_user_account()
-
-    assert ok is True
-    assert sentinel_calls == [
-        ("did-create", "oauth_create_account"),
-        ("did-create", "oauth_create_account"),
-    ]
-    assert len(session.calls) == 2
-    first_headers = session.calls[0]["kwargs"]["headers"]
-    second_headers = session.calls[1]["kwargs"]["headers"]
-    first_sentinel = json.loads(first_headers["openai-sentinel-token"])
-    second_sentinel = json.loads(second_headers["openai-sentinel-token"])
-    assert first_headers["oai-device-id"] == "did-create"
-    assert second_headers["oai-device-id"] == "did-create"
-    assert first_sentinel["flow"] == "oauth_create_account"
-    assert second_sentinel["flow"] == "oauth_create_account"
-    assert first_sentinel["c"] == "token-1"
-    assert second_sentinel["c"] == "token-2"
+    assert result.error_message == "Playwright 模式未获取到 session_token"
+    assert result.metadata["playwright_diagnostics"]["stage"] == "failed"
+    assert result.metadata["playwright_diagnostics"]["failure_reason"] == "session_token_missing"
+    assert result.metadata["playwright_diagnostics"]["used_signin_bridge"] is True
 
 
 def _workspace_cookie(workspace_id):
@@ -600,10 +353,7 @@ def test_run_registers_then_relogs_to_fetch_token():
     engine = RegistrationEngine(email_service)
     engine.registration_entry_flow = "native"
     fake_oauth = FakeOAuthManager()
-    engine.http_client = FakeOpenAIClient(
-        [session_one, session_two],
-        ["sentinel-1", "sentinel-2", "sentinel-3", "sentinel-4", "sentinel-5"],
-    )
+    engine.http_client = FakeOpenAIClient([session_one, session_two], ["sentinel-1", "sentinel-2", "sentinel-3"])
     engine.oauth_manager = fake_oauth
     engine._follow_redirects = lambda url: ("http://localhost:1455/auth/callback?code=code-2&state=state-2", url)
 

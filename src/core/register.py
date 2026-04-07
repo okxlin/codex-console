@@ -8,7 +8,6 @@ import json
 import base64
 import time
 import logging
-import os
 import secrets
 import string
 import uuid
@@ -23,7 +22,6 @@ from curl_cffi import requests as cffi_requests
 from .openai.oauth import OAuthManager, OAuthStart
 from .openai.token_refresh import TokenRefreshManager
 from .openai.browser_session_capture import capture_chatgpt_session_with_playwright
-from .openai.sentinel_browser import get_sentinel_token_via_browser
 from .playwright_artifacts import build_failure_screenshot_path, artifact_to_metadata
 from .upload.cpa_upload import generate_token_json
 from .http_client import OpenAIHTTPClient, HTTPClientError
@@ -338,96 +336,6 @@ class RegistrationEngine:
         metadata = dict(result.metadata or {})
         metadata.update({k: v for k, v in extra.items() if v is not None})
         result.metadata = metadata
-
-    def _record_abcard_diagnostics(
-        self,
-        result: RegistrationResult,
-        *,
-        stage: str = "",
-        reuse_attempted: Optional[bool] = None,
-        reuse_succeeded: Optional[bool] = None,
-        reuse_source: str = "",
-        recovery_path: str = "",
-        error_code: str = "",
-        error_stage: str = "",
-        continue_url: str = "",
-        entry_flow: str = "",
-    ) -> None:
-        diagnostics = dict((result.metadata or {}).get("abcard_diagnostics") or {})
-        diagnostics.update(
-            {
-                "stage": str(stage or diagnostics.get("stage") or "").strip(),
-                "reuse_source": str(reuse_source or diagnostics.get("reuse_source") or "").strip(),
-                "recovery_path": str(recovery_path or diagnostics.get("recovery_path") or "").strip(),
-                "error_code": str(error_code or diagnostics.get("error_code") or "").strip(),
-                "error_stage": str(error_stage or diagnostics.get("error_stage") or "").strip(),
-                "continue_url": str(continue_url or diagnostics.get("continue_url") or "").strip(),
-                "entry_flow": str(entry_flow or diagnostics.get("entry_flow") or "").strip(),
-                "otp_continue_url": str(self._last_validate_otp_continue_url or diagnostics.get("otp_continue_url") or "").strip(),
-                "create_account_continue_url": str(self._create_account_continue_url or diagnostics.get("create_account_continue_url") or "").strip(),
-                "has_session_token": bool(result.session_token),
-                "has_access_token": bool(result.access_token),
-                "has_refresh_token": bool(result.refresh_token),
-            }
-        )
-        if reuse_attempted is not None:
-            diagnostics["reuse_attempted"] = bool(reuse_attempted)
-        if reuse_succeeded is not None:
-            diagnostics["reuse_succeeded"] = bool(reuse_succeeded)
-        self._merge_result_metadata(result, abcard_diagnostics=diagnostics)
-
-    @staticmethod
-    def _is_abcard_entry_active(effective_entry_flow: str) -> bool:
-        return str(effective_entry_flow or "").strip().lower() == "abcard"
-
-    def _try_preferred_post_create_session_reuse(
-        self,
-        result: RegistrationResult,
-        effective_entry_flow: str,
-    ) -> tuple[bool, str]:
-        normalized_flow = str(effective_entry_flow or "").strip().lower()
-        if self._is_existing_account:
-            return False, ""
-
-        if normalized_flow == "abcard":
-            self._record_abcard_diagnostics(
-                result,
-                stage="post_create_reuse_start",
-                reuse_attempted=True,
-                reuse_source="current_registration_session",
-                recovery_path="direct_reuse",
-                entry_flow=normalized_flow,
-            )
-            if self._try_reuse_current_registration_session(result):
-                self._record_abcard_diagnostics(
-                    result,
-                    stage="post_create_reuse_ok",
-                    reuse_attempted=True,
-                    reuse_succeeded=True,
-                    reuse_source="current_registration_session",
-                    recovery_path="direct_reuse",
-                    entry_flow=normalized_flow,
-                )
-                return True, "ABCard + 当前会话复用直取"
-            self._record_abcard_diagnostics(
-                result,
-                stage="post_create_reuse_miss",
-                reuse_attempted=True,
-                reuse_succeeded=False,
-                reuse_source="current_registration_session",
-                recovery_path="fallback_complete_token_exchange",
-                error_code="abcard_reuse_miss",
-                error_stage="post_create_reuse",
-                entry_flow=normalized_flow,
-            )
-            return False, ""
-
-        if normalized_flow == "native":
-            if self._try_reuse_current_registration_session(result):
-                return True, "Native + 当前会话复用直取"
-            if self._try_browser_side_channel_session_capture(result):
-                return True, "Native + 浏览器态侧信道"
-        return False, ""
 
     def _record_playwright_diagnostics(
         self,
@@ -992,61 +900,19 @@ class RegistrationEngine:
         self._log(f"未获取到 oai-did，使用兜底 Device ID: {fallback_did}", "warning")
         return fallback_did
 
-    def _check_sentinel(self, did: str, flow: str = "authorize_continue") -> Optional[str]:
+    def _check_sentinel(self, did: str) -> Optional[str]:
         """检查 Sentinel 拦截"""
         try:
-            normalized_flow = str(flow or "authorize_continue").strip() or "authorize_continue"
-            browser_first_flows = {"username_password_create", "oauth_create_account"}
-            browser_sentinel_enabled = str(os.environ.get("OPENAI_BROWSER_SENTINEL_ENABLED") or "").strip().lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
-            if browser_sentinel_enabled and normalized_flow in browser_first_flows:
-                browser_token = get_sentinel_token_via_browser(
-                    normalized_flow,
-                    proxy_url=str(self.proxy_url or ""),
-                )
-                if browser_token:
-                    self._log(f"浏览器态 Sentinel token 获取成功（flow={normalized_flow}）")
-                    return browser_token
-            sen_token = self.http_client.check_sentinel(did, flow=normalized_flow)
+            sen_token = self.http_client.check_sentinel(did)
             if sen_token:
-                self._log(f"Sentinel token 获取成功（flow={normalized_flow}）")
+                self._log(f"Sentinel token 获取成功")
                 return sen_token
-            self._log(f"Sentinel 检查失败: 未获取到 token（flow={normalized_flow}）", "warning")
+            self._log("Sentinel 检查失败: 未获取到 token", "warning")
             return None
 
         except Exception as e:
-            self._log(f"Sentinel 检查异常（flow={flow}）: {e}", "warning")
+            self._log(f"Sentinel 检查异常: {e}", "warning")
             return None
-
-    @staticmethod
-    def _build_openai_sentinel_header(token: Optional[str], did: str, flow: str) -> Dict[str, str]:
-        sentinel_token = str(token or "").strip()
-        device_id = str(did or "").strip()
-        normalized_flow = str(flow or "authorize_continue").strip() or "authorize_continue"
-        if not sentinel_token:
-            return {}
-        sentinel_payload = json.dumps(
-            {
-                "p": "",
-                "t": "",
-                "c": sentinel_token,
-                "id": device_id,
-                "flow": normalized_flow,
-            },
-            separators=(",", ":"),
-        )
-        return {"openai-sentinel-token": sentinel_payload}
-
-    @staticmethod
-    def _should_retry_create_account_after_sentinel_response(status_code: int, response_text: str) -> bool:
-        if int(status_code) not in {400, 403}:
-            return False
-        normalized_text = str(response_text or "").lower()
-        return ("sentinel" in normalized_text) or ("registration_disallowed" in normalized_text)
 
     def _submit_auth_start(
         self,
@@ -1081,11 +947,17 @@ class RegistrationEngine:
                     "referer": referer,
                     "accept": "application/json",
                     "content-type": "application/json",
-                    **({"oai-device-id": current_did} if current_did else {}),
                 }
 
                 if current_sen_token:
-                    headers.update(self._build_openai_sentinel_header(current_sen_token, current_did, "authorize_continue"))
+                    sentinel = json.dumps({
+                        "p": "",
+                        "t": "",
+                        "c": current_sen_token,
+                        "id": current_did,
+                        "flow": "authorize_continue",
+                    })
+                    headers["openai-sentinel-token"] = sentinel
 
                 response = self.session.post(
                     OPENAI_API_ENDPOINTS["signup"],
@@ -1114,7 +986,7 @@ class RegistrationEngine:
                     )
                     # 尝试刷新 sentinel，避免 token 过期导致冲突。
                     try:
-                        refreshed = self._check_sentinel(current_did, flow="authorize_continue")
+                        refreshed = self._check_sentinel(current_did)
                         if refreshed:
                             current_sen_token = refreshed
                     except Exception:
@@ -1227,17 +1099,12 @@ class RegistrationEngine:
 
         for attempt in range(1, max_attempts + 1):
             try:
-                effective_did = str(self.device_id or self.session.cookies.get("oai-did") or "").strip()
-                password_sentinel = self._check_sentinel(effective_did, flow="password_verify") if effective_did else None
                 response = self.session.post(
                     OPENAI_API_ENDPOINTS["password_verify"],
                     headers={
                         "referer": "https://auth.openai.com/log-in/password",
-                        "origin": "https://auth.openai.com",
                         "accept": "application/json",
                         "content-type": "application/json",
-                        **({"oai-device-id": effective_did} if effective_did else {}),
-                        **self._build_openai_sentinel_header(password_sentinel, effective_did, "password_verify"),
                     },
                     data=json.dumps({"password": self.password}),
                 )
@@ -1326,7 +1193,7 @@ class RegistrationEngine:
         self.device_id = did
 
         self._log(f"{label}: 解一道 Sentinel POW 小题，答对才给进...")
-        sen_token = self._check_sentinel(did, flow="authorize_continue")
+        sen_token = self._check_sentinel(did)
         if not sen_token:
             return did, None
 
@@ -1968,13 +1835,6 @@ class RegistrationEngine:
 
     def _complete_token_exchange(self, result: RegistrationResult, require_login_otp: bool = True) -> bool:
         """在登录态已建立后，补齐 session/access，并尽量获取 OAuth token。"""
-        if not require_login_otp:
-            self._record_abcard_diagnostics(
-                result,
-                stage="complete_token_exchange_start",
-                recovery_path="workspace_redirect",
-                entry_flow="abcard",
-            )
         if require_login_otp:
             self._log("等待登录验证码到场，最后这位嘉宾还在路上...")
             self._log("核对登录验证码，验明正身一下...")
@@ -2026,26 +1886,8 @@ class RegistrationEngine:
         # ABCard 入口常见失败点：被 add-phone 风控页截断，导致拿不到 callback/session。
         if add_phone_gate and (not callback_url) and (not captured):
             self._log("检测到 auth.openai.com/add-phone 风控页，当前链路未完成 OAuth 回调", "warning")
-            self._record_abcard_diagnostics(
-                result,
-                stage="add_phone_gate",
-                recovery_path="workspace_redirect",
-                error_code="abcard_add_phone_gate",
-                error_stage="redirect_follow",
-                continue_url=continue_url,
-                entry_flow="abcard" if not require_login_otp else "",
-            )
             if (not require_login_otp) and (not self._is_existing_account):
                 self._log("ABCard 入口命中 add-phone，回退原生重登链路再试一次...", "warning")
-                self._record_abcard_diagnostics(
-                    result,
-                    stage="native_relogin_fallback",
-                    recovery_path="native_relogin_fallback",
-                    error_code="abcard_add_phone_gate",
-                    error_stage="redirect_follow",
-                    continue_url=continue_url,
-                    entry_flow="abcard",
-                )
                 login_ready, login_error = self._restart_login_flow()
                 if not login_ready:
                     result.error_message = f"ABCard 回退原生链路失败: {login_error}"
@@ -2080,15 +1922,6 @@ class RegistrationEngine:
             if captured:
                 self._log("未拿到 callback_url，但 session/access 已拿到，继续后续流程", "warning")
             else:
-                if not require_login_otp:
-                    self._record_abcard_stoploss(
-                        result,
-                        reason="redirect_follow_failed",
-                        continue_url=continue_url,
-                        stage="redirect_follow",
-                        recovery_path="workspace_redirect",
-                        error_code="abcard_redirect_follow_failed",
-                    )
                 result.error_message = "跟随重定向链失败"
                 return False
 
@@ -2113,15 +1946,6 @@ class RegistrationEngine:
             result.device_id = str(self.device_id or self.session.cookies.get("oai-did") or "")
 
         if not result.access_token:
-            if not require_login_otp:
-                self._record_abcard_stoploss(
-                    result,
-                    reason="access_token_missing",
-                    continue_url=continue_url,
-                    stage="final_access_token_check",
-                    recovery_path="workspace_redirect",
-                    error_code="abcard_access_token_missing",
-                )
             result.error_message = "未获取到 access_token"
             return False
         if not result.session_token:
@@ -2135,31 +1959,12 @@ class RegistrationEngine:
             else:
                 # 非原生注册入口仍保持强制，避免后续流程不可用。
                 if not self._ensure_session_token_strict(result, max_rounds=2):
-                    if not require_login_otp:
-                        self._record_abcard_stoploss(
-                            result,
-                            reason="session_token_missing",
-                            continue_url=continue_url,
-                            stage="final_session_token_check",
-                            recovery_path="workspace_redirect",
-                            error_code="abcard_session_token_missing",
-                        )
                     result.error_message = "未获取到 session_token（强制要求）"
                     self._log(
                         "强制模式未拿到 session_token，本次注册判定失败，请检查网络/代理与登录回调链路",
                         "error",
                     )
                     return False
-
-        if not require_login_otp:
-            self._record_abcard_diagnostics(
-                result,
-                stage="complete_token_exchange_ok",
-                recovery_path="workspace_redirect",
-                reuse_succeeded=bool(result.access_token),
-                continue_url=continue_url,
-                entry_flow="abcard",
-            )
 
         return True
 
@@ -2838,25 +2643,13 @@ class RegistrationEngine:
         self._record_abcard_stoploss(result, reason="consent_recovery_failed", continue_url=candidates[0])
         return False
 
-    def _record_abcard_stoploss(
-        self,
-        result: RegistrationResult,
-        reason: str,
-        continue_url: str = "",
-        *,
-        stage: str = "",
-        recovery_path: str = "",
-        error_code: str = "",
-    ) -> None:
+    def _record_abcard_stoploss(self, result: RegistrationResult, reason: str, continue_url: str = "") -> None:
         """失败分层记录，便于后续观察 add-phone/consent/workspace 热点。"""
         metadata = dict(result.metadata or {})
         stoploss = dict(metadata.get("abcard_stoploss") or {})
         stoploss.update(
             {
                 "reason": str(reason or "").strip(),
-                "stage": str(stage or stoploss.get("stage") or "").strip(),
-                "recovery_path": str(recovery_path or stoploss.get("recovery_path") or "").strip(),
-                "error_code": str(error_code or stoploss.get("error_code") or reason or "").strip(),
                 "continue_url": str(continue_url or "").strip(),
                 "workspace_id": str(result.workspace_id or self._create_account_workspace_id or "").strip(),
                 "account_id": str(result.account_id or self._create_account_account_id or "").strip(),
@@ -2868,15 +2661,6 @@ class RegistrationEngine:
         )
         metadata["abcard_stoploss"] = stoploss
         result.metadata = metadata
-        self._record_abcard_diagnostics(
-            result,
-            stage=stage or "stoploss",
-            recovery_path=recovery_path,
-            error_code=error_code or reason,
-            error_stage=stage or "stoploss",
-            continue_url=continue_url,
-            reuse_source="current_registration_session" if self._is_abcard_entry_active(self.registration_entry_flow) else "",
-        )
 
     def _attempt_add_phone_session_bridge(self, result: RegistrationResult, workspace_id: str = "") -> bool:
         """命中 add-phone 时，优先尝试会话桥接而不是直接回退 OAuth authorize。"""
@@ -3022,13 +2806,6 @@ class RegistrationEngine:
     def _try_reuse_current_registration_session(self, result: RegistrationResult) -> bool:
         """对齐方案二：注册成功后优先复用当前会话直取 session/access token。"""
         try:
-            self._record_abcard_diagnostics(
-                result,
-                stage="reuse_attempt_start",
-                reuse_attempted=True,
-                reuse_source="current_registration_session",
-                recovery_path="direct_reuse",
-            )
             self._log("优先尝试复用注册后当前会话，直接提取 session/access token ...")
             callback_continue = str(self._last_validate_otp_continue_url or "").strip()
             if "/api/auth/callback/openai" in callback_continue:
@@ -3036,15 +2813,6 @@ class RegistrationEngine:
                 if self._stabilize_chatgpt_callback_session(callback_continue, result):
                     if not result.account_id and result.access_token:
                         result.account_id = self._extract_account_id_from_access_token(result.access_token)
-                    self._record_abcard_diagnostics(
-                        result,
-                        stage="reuse_attempt_ok",
-                        reuse_attempted=True,
-                        reuse_succeeded=True,
-                        reuse_source="callback_continue",
-                        recovery_path="direct_reuse",
-                        continue_url=callback_continue,
-                    )
                     return True
                 try:
                     self._follow_redirects(callback_continue)
@@ -3070,43 +2838,12 @@ class RegistrationEngine:
 
             if result.access_token:
                 self._log("当前会话直取成功，已拿到 access_token")
-                self._record_abcard_diagnostics(
-                    result,
-                    stage="reuse_attempt_ok",
-                    reuse_attempted=True,
-                    reuse_succeeded=True,
-                    reuse_source="current_registration_session",
-                    recovery_path="direct_reuse",
-                    continue_url=callback_continue,
-                )
                 return True
 
             self._log("当前会话直取未命中 access_token，回退后续收尾链路", "warning")
-            self._record_abcard_diagnostics(
-                result,
-                stage="reuse_attempt_miss",
-                reuse_attempted=True,
-                reuse_succeeded=False,
-                reuse_source="current_registration_session",
-                recovery_path="fallback_complete_token_exchange",
-                error_code="abcard_reuse_miss",
-                error_stage="reuse_attempt",
-                continue_url=callback_continue,
-            )
             return False
         except Exception as e:
             self._log(f"当前会话直取异常: {e}", "warning")
-            self._record_abcard_diagnostics(
-                result,
-                stage="reuse_attempt_exception",
-                reuse_attempted=True,
-                reuse_succeeded=False,
-                reuse_source="current_registration_session",
-                recovery_path="fallback_complete_token_exchange",
-                error_code="abcard_reuse_exception",
-                error_stage="reuse_attempt",
-                continue_url=str(self._last_validate_otp_continue_url or ""),
-            )
             return False
 
     def _stabilize_chatgpt_callback_session(self, callback_url: str, result: RegistrationResult) -> bool:
@@ -3675,20 +3412,12 @@ class RegistrationEngine:
                 "username": self.email
             })
 
-            effective_did = str(did or self.device_id or self.session.cookies.get("oai-did") or "").strip()
-            effective_sentinel = str(sen_token or "").strip() if sen_token else ""
-            if effective_did and not effective_sentinel:
-                effective_sentinel = str(self._check_sentinel(effective_did, flow="username_password_create") or "").strip()
-
             response = self.session.post(
                 OPENAI_API_ENDPOINTS["register"],
                 headers={
                     "referer": "https://auth.openai.com/create-account/password",
-                    "origin": "https://auth.openai.com",
                     "accept": "application/json",
                     "content-type": "application/json",
-                    **({"oai-device-id": effective_did} if effective_did else {}),
-                    **self._build_openai_sentinel_header(effective_sentinel, effective_did, "username_password_create"),
                 },
                 data=register_body,
             )
@@ -3828,18 +3557,13 @@ class RegistrationEngine:
             self._last_otp_validation_status_code = None
             self._last_otp_validation_outcome = ""
             code_body = f'{{"code":"{code}"}}'
-            effective_did = str(self.device_id or self.session.cookies.get("oai-did") or "").strip()
-            otp_sentinel = self._check_sentinel(effective_did, flow="email_otp_validate") if effective_did else None
 
             response = self.session.post(
                 OPENAI_API_ENDPOINTS["validate_otp"],
                 headers={
                     "referer": "https://auth.openai.com/email-verification",
-                    "origin": "https://auth.openai.com",
                     "accept": "application/json",
                     "content-type": "application/json",
-                    **({"oai-device-id": effective_did} if effective_did else {}),
-                    **self._build_openai_sentinel_header(otp_sentinel, effective_did, "email_otp_validate"),
                 },
                 data=code_body,
             )
@@ -3988,28 +3712,20 @@ class RegistrationEngine:
             self._last_create_account_payload = dict(user_info)
             create_account_body = json.dumps(user_info)
             did = str(self.device_id or self.session.cookies.get("oai-did") or "").strip()
-            sentinel = self._check_sentinel(did, flow="oauth_create_account") if did else None
+            sentinel = self._check_sentinel(did) if did else None
 
-            def _submit_create_account_request(current_sentinel: Optional[str]):
-                return self.session.post(
-                    OPENAI_API_ENDPOINTS["create_account"],
-                    headers={
-                        "referer": "https://auth.openai.com/about-you",
-                        "origin": "https://auth.openai.com",
-                        "accept": "application/json",
-                        "content-type": "application/json",
-                        **({"oai-device-id": did} if did else {}),
-                        **self._build_openai_sentinel_header(current_sentinel, did, "oauth_create_account"),
-                    },
-                    data=create_account_body,
-                )
-
-            response = _submit_create_account_request(sentinel)
-            if did and self._should_retry_create_account_after_sentinel_response(response.status_code, str(response.text or "")):
-                self._log("账户创建命中 Sentinel 类 400/403，刷新 token 后重试一次...", "warning")
-                refreshed_sentinel = self._check_sentinel(did, flow="oauth_create_account")
-                if refreshed_sentinel:
-                    response = _submit_create_account_request(refreshed_sentinel)
+            response = self.session.post(
+                OPENAI_API_ENDPOINTS["create_account"],
+                headers={
+                    "referer": "https://auth.openai.com/about-you",
+                    "origin": "https://auth.openai.com",
+                    "accept": "application/json",
+                    "content-type": "application/json",
+                    **({"oai-device-id": did} if did else {}),
+                    **({"openai-sentinel-token": sentinel} if sentinel else {}),
+                },
+                data=create_account_body,
+            )
 
             self._log(f"账户创建状态: {response.status_code}")
 
@@ -4437,7 +4153,7 @@ class RegistrationEngine:
             service_type_raw = getattr(self.email_service, "service_type", "")
             service_type_value = str(getattr(service_type_raw, "value", service_type_raw) or "").strip().lower()
             effective_entry_flow, effective_scheme_label = self._resolve_effective_entry_flow(service_type_value)
-            post_create_completion_shortcut = False
+            native_completion_shortcut = False
             if configured_entry_flow == "auto" and effective_entry_flow == "outlook":
                 self._log("检测到 Outlook 邮箱，自动使用 Outlook 入口链路（无需在设置中选择）")
             elif configured_entry_flow == "auto":
@@ -4571,37 +4287,25 @@ class RegistrationEngine:
                     return result
                 self._raise_if_cancelled()
 
-                shortcut_handled, shortcut_label = self._try_preferred_post_create_session_reuse(
-                    result,
-                    effective_entry_flow,
-                )
-                if shortcut_handled:
-                    result.password = self.password or ""
-                    result.source = "register"
-                    result.device_id = result.device_id or str(self.device_id or "")
-                    if self._is_abcard_entry_active(effective_entry_flow):
-                        self._log("注册入口链路: ABCard 优先走当前会话复用直取，已完成收尾")
+                if effective_entry_flow == "native":
+                    if self._try_reuse_current_registration_session(result):
+                        result.password = self.password or ""
+                        result.source = "register"
+                        result.device_id = result.device_id or str(self.device_id or "")
+                        self._log("注册入口链路: Native 优先走会话复用直取，已完成收尾")
+                        effective_scheme_label = "Native + 当前会话复用直取"
+                        native_completion_shortcut = True
+                    elif self._try_browser_side_channel_session_capture(result):
+                        result.password = self.password or ""
+                        result.source = "register"
+                        result.device_id = result.device_id or str(self.device_id or "")
+                        self._log("注册入口链路: Native 浏览器态侧信道已完成收尾")
+                        effective_scheme_label = "Native + 浏览器态侧信道"
+                        native_completion_shortcut = True
                     else:
-                        self._log(f"注册入口链路: {shortcut_label}，已完成收尾")
-                    effective_scheme_label = shortcut_label or effective_scheme_label
-                    post_create_completion_shortcut = True
-                elif effective_entry_flow == "native":
-                    self._log("注册入口链路: Native 会话直取与浏览器侧信道均未命中，回退原生重登收尾", "warning")
-                elif self._is_abcard_entry_active(effective_entry_flow):
-                    self._record_abcard_diagnostics(
-                        result,
-                        stage="handoff_to_complete_token_exchange",
-                        reuse_attempted=True,
-                        reuse_succeeded=False,
-                        reuse_source="current_registration_session",
-                        recovery_path="fallback_complete_token_exchange",
-                        error_code="abcard_reuse_miss",
-                        error_stage="post_create_reuse",
-                        entry_flow="abcard",
-                    )
-                    self._log("注册入口链路: ABCard 当前会话复用未命中，继续走免重登收尾链路", "warning")
+                        self._log("注册入口链路: Native 会话直取与浏览器侧信道均未命中，回退原生重登收尾", "warning")
 
-                if post_create_completion_shortcut:
+                if native_completion_shortcut:
                     pass
                 elif effective_entry_flow in {"native", "outlook"}:
                     login_ready, login_error = self._restart_login_flow()
@@ -4615,9 +4319,7 @@ class RegistrationEngine:
                 else:
                     self._log("注册入口链路: ABCard（方案二：新账号不重登，直接抓取会话）")
 
-            if post_create_completion_shortcut:
-                pass
-            elif effective_entry_flow == "native":
+            if effective_entry_flow == "native" and not native_completion_shortcut:
                 if not self._complete_token_exchange_native_backup(result):
                     return result
             elif effective_entry_flow == "outlook":
@@ -4644,8 +4346,6 @@ class RegistrationEngine:
             self._log("=" * 60)
 
             result.success = True
-            existing_abcard_metadata = dict((result.metadata or {}).get("abcard_diagnostics") or {})
-            existing_abcard_stoploss = dict((result.metadata or {}).get("abcard_stoploss") or {})
             settings = get_settings()
             client_id = str(getattr(settings, "openai_client_id", "") or getattr(self.oauth_manager, "client_id", "") or "").strip()
             result.metadata = {
@@ -4670,10 +4370,6 @@ class RegistrationEngine:
                 "session_token_pending": (effective_entry_flow == "native") and (not bool(result.session_token)),
                 "playwright_mode": (effective_entry_flow == "playwright"),
             }
-            if existing_abcard_metadata:
-                result.metadata["abcard_diagnostics"] = existing_abcard_metadata
-            if existing_abcard_stoploss:
-                result.metadata["abcard_stoploss"] = existing_abcard_stoploss
             export_account = Account(
                 email=result.email,
                 password=result.password,

@@ -350,13 +350,7 @@ class OpenAIHTTPClient(HTTPClient):
         except cffi_requests.RequestsError as e:
             raise HTTPClientError(f"OpenAI 请求失败: {endpoint} - {e}")
 
-    def check_sentinel(
-        self,
-        did: str,
-        proxies: Optional[Dict] = None,
-        *,
-        flow: str = "authorize_continue",
-    ) -> Optional[str]:
+    def check_sentinel(self, did: str, proxies: Optional[Dict] = None) -> Optional[str]:
         """
         检查 Sentinel 拦截
 
@@ -371,11 +365,10 @@ class OpenAIHTTPClient(HTTPClient):
 
         try:
             pow_token = build_sentinel_pow_token(self.default_headers.get("User-Agent", ""))
-            normalized_flow = str(flow or "authorize_continue").strip() or "authorize_continue"
             sen_req_body = json.dumps({
                 "p": pow_token,
                 "id": did,
-                "flow": normalized_flow,
+                "flow": "authorize_continue",
             }, separators=(",", ":"))
 
             response = self.post(

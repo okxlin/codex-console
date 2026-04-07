@@ -269,12 +269,6 @@ SETTING_DEFINITIONS: Dict[str, SettingDefinition] = {
         category=SettingCategory.REGISTRATION,
         description="Playwright 模式失败时是否保留最终截图"
     ),
-    "registration_playwright_headed": SettingDefinition(
-        db_key="registration.playwright.headed",
-        default_value=False,
-        category=SettingCategory.REGISTRATION,
-        description="Playwright 浏览器启动模式（false=无头，true=有头）"
-    ),
     "registration_playwright_artifact_retention_days": SettingDefinition(
         db_key="registration.playwright.artifact_retention_days",
         default_value=7,
@@ -716,7 +710,6 @@ SETTING_TYPES: Dict[str, Type] = {
     "registration_sleep_max": int,
     "registration_entry_flow": str,
     "registration_refresh_backfill_enabled": bool,
-    "registration_playwright_headed": bool,
     "registration_auto_enabled": bool,
     "registration_auto_check_interval": int,
     "registration_auto_min_ready_auth_files": int,
@@ -1011,7 +1004,6 @@ class Settings(BaseModel):
     registration_entry_flow: str = "auto"
     registration_refresh_backfill_enabled: bool = False
     registration_playwright_failure_screenshot_enabled: bool = True
-    registration_playwright_headed: bool = False
     registration_playwright_artifact_retention_days: int = 7
     registration_playwright_artifact_max_total_size_mb: int = 512
     registration_playwright_artifact_max_total_files: int = 500

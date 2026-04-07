@@ -40,16 +40,9 @@ logs/
 *.db
 *.sqlite
 *.sqlite3
-*.log
 
 # Token files
 token_*.json
-auth.json
-auth-*.json
-cookies.json
-cookies-*.json
-storage_state*.json
-playwright/.auth/
 
 # Environment
 .env
@@ -63,21 +56,3 @@ Thumbs.db
 # Project specific
 backups/
 /out/
-
-# Local runtime / webui test outputs
-runtime-tests/matrix-results/
-runtime-tests/**/data/
-runtime-tests/**/logs/
-runtime-tests/webui-test/
-tests_runtime/
-
-# Browser/debug artifacts
-playwright-artifacts/
-*.har
-*.trace
-trace.zip
-playwright-trace/
-
-# Local handoff bundles
-*-pr-source-*.zip
-*-zip-staging/

@@ -88,7 +88,6 @@ class RegistrationSettings(BaseModel):
     entry_flow: str = "fast"
     refresh_backfill_enabled: bool = False
     playwright_failure_screenshot_enabled: bool = True
-    playwright_headed: bool = False
     playwright_artifact_retention_days: int = 7
     playwright_artifact_max_total_size_mb: int = 512
     playwright_artifact_max_total_files: int = 500
@@ -187,7 +186,6 @@ async def get_all_settings():
             "entry_flow": entry_flow,
             "refresh_backfill_enabled": settings.registration_refresh_backfill_enabled,
             "playwright_failure_screenshot_enabled": settings.registration_playwright_failure_screenshot_enabled,
-            "playwright_headed": settings.registration_playwright_headed,
             "playwright_artifact_retention_days": settings.registration_playwright_artifact_retention_days,
             "playwright_artifact_max_total_size_mb": settings.registration_playwright_artifact_max_total_size_mb,
             "playwright_artifact_max_total_files": settings.registration_playwright_artifact_max_total_files,
@@ -363,7 +361,6 @@ async def get_registration_settings():
         "entry_flow": entry_flow,
         "refresh_backfill_enabled": settings.registration_refresh_backfill_enabled,
         "playwright_failure_screenshot_enabled": settings.registration_playwright_failure_screenshot_enabled,
-        "playwright_headed": settings.registration_playwright_headed,
         "playwright_artifact_retention_days": settings.registration_playwright_artifact_retention_days,
         "playwright_artifact_max_total_size_mb": settings.registration_playwright_artifact_max_total_size_mb,
         "playwright_artifact_max_total_files": settings.registration_playwright_artifact_max_total_files,
@@ -506,7 +503,6 @@ async def update_registration_settings(request: RegistrationSettings):
         registration_entry_flow=flow,
         registration_refresh_backfill_enabled=request.refresh_backfill_enabled,
         registration_playwright_failure_screenshot_enabled=request.playwright_failure_screenshot_enabled,
-        registration_playwright_headed=request.playwright_headed,
         registration_playwright_artifact_retention_days=request.playwright_artifact_retention_days,
         registration_playwright_artifact_max_total_size_mb=request.playwright_artifact_max_total_size_mb,
         registration_playwright_artifact_max_total_files=request.playwright_artifact_max_total_files,
